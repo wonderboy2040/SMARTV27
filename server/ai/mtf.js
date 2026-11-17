@@ -770,7 +770,13 @@ export function __tfVote(candles, tf) { return _tfVote(candles, tf); }
 // ------------------------------------------------------------
 const CHART_TFS = new Set(['5m', '15m', '1h', '1d']);
 const _chartCache = new Map();
-const CHART_TTL_MS = 60_000;
+// v21.37.2 [LIVE-ANCHOR]: 60s → 15s. The chart response rides the SAME
+// futures-candle cache as the board (12s TTL for 1m/5m/15m), so a 15s
+// read always lands AFTER that cache expired — no extra upstream call,
+// par bar-roll ke baad official open/high/low/volume 12–15s me anchor
+// ho jate hain instead of staying synthetic for a full minute. The
+// forming bar's close still rides the CoinDCX WS overlay per READ.
+const CHART_TTL_MS = 15_000;
 const CHART_CACHE_MAX = 64;
 
 export async function chartCandles(symbol, market, tf, opts = {}) {

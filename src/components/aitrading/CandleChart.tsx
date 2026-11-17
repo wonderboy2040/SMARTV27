@@ -8,7 +8,9 @@
 // VISUAL, not just numbers.
 //
 // Honest degrade: source down / thin symbol → a text note, never a
-// fake chart. 60s auto-refresh while mounted and the tab is visible.
+// fake chart. While mounted and visible the 96-bar anchor re-fetches
+// every 60s, and the FORMING bar rides the live `ltp` prop (SSE ticks
+// on the desks) — see mergeLiveTick (v21.37.2).
 // Fully self-contained (own fetch + state) — SignalCard embeds it
 // lazily behind an "open chart" toggle; the deep modal renders it
 // directly.
@@ -40,8 +42,42 @@ interface VisionVerdict {
 
 const TFS = ['5m', '15m', '1h', '1d'] as const;
 type Tf = typeof TFS[number];
-const REFRESH_MS = 60_000;                       // default: all markets
+const REFRESH_MS = 60_000;                       // anchor re-fetch (forming bar rides the live tick)
 const METALS_REFRESH_MS = 5_000;                  // v21.36.9: METALS tracks 3s REST floor + 1s WS
+const TF_MS: Record<Tf, number> = { '5m': 300_000, '15m': 900_000, '1h': 3_600_000, '1d': 86_400_000 };
+const LIVE_SANITY_PCT = 0.05;
+
+// v21.37.2 [LIVE FORMING BAR]: /api/ai/candles is cached 15s server-side
+// and the component re-fetches the 96-bar anchor every 60s. Without this
+// merge the LAST candle stayed frozen between fetches — the chart looked
+// up to a minute behind the tape even though the server overlay was live.
+// We mirror the server's relative-bar rule on the DISPLAY series only:
+//   in-window tick  → patch close/high/low
+//   next window     → append ONE live bar (volume 0, self-heals on fetch)
+// Sanity (5%) blocks a cross-domain print; a series two windows stale is
+// left alone so a hidden-tab wake-up can never fabricate a distant bar.
+export function mergeLiveTick(candles: Candle[] | null, ltp: number | null | undefined, tf: Tf, now = Date.now()): Candle[] | null {
+  if (!Array.isArray(candles) || candles.length === 0) return candles;
+  const price = Number(ltp);
+  if (!(price > 0) || !Number.isFinite(price)) return candles;
+  const tfMs = TF_MS[tf];
+  const last = candles[candles.length - 1];
+  const lastClose = Number(last?.close);
+  const barTime = Number(last?.time);
+  if (!(lastClose > 0) || !Number.isFinite(barTime)) return candles;
+  if (Math.abs(price - lastClose) / lastClose > LIVE_SANITY_PCT) return candles;
+  if (now < barTime) return candles;
+  if (now - barTime < tfMs) {
+    return [...candles.slice(0, -1), {
+      ...last,
+      close: price,
+      high: Math.max(Number(last.high) || price, price),
+      low: Math.min(Number(last.low) || price, price),
+    }];
+  }
+  if (now - barTime >= tfMs * 2) return candles; // stale series — let the fetch roll it honestly
+  return [...candles, { time: barTime + tfMs, open: price, high: price, low: price, close: price, volume: 0 }];
+}
 
 const px = (v: number) => {
   if (!Number.isFinite(v)) return '—';
@@ -133,8 +169,12 @@ export const CandleChart = memo(function CandleChart({
   const H = compact ? 150 : 210;
   const W = 100; // viewBox width % — scales with container
 
+  // Display series = server anchor + the live tick prop (SSE-driven on the
+  // crypto desks). The raw `candles` stay untouched for the next fetch.
+  const liveCandles = useMemo(() => mergeLiveTick(candles, ltp, tf), [candles, ltp, tf]);
+
   const view = useMemo(() => {
-    if (!candles || candles.length < 2) return null;
+    if (!liveCandles || liveCandles.length < 2) return null;
     const levels: Array<[string, number]> = [];
     if (plan?.entry != null && Number.isFinite(plan.entry)) levels.push(['ENTRY', plan.entry]);
     if (plan?.stopLoss != null && Number.isFinite(plan.stopLoss)) levels.push(['SL', plan.stopLoss]);
@@ -142,13 +182,13 @@ export const CandleChart = memo(function CandleChart({
     if (plan?.target2 != null && Number.isFinite(plan.target2)) levels.push(['T2', plan.target2]);
     if (ltp != null && Number.isFinite(ltp)) levels.push(['LTP', ltp]);
     let min = Infinity, max = -Infinity;
-    for (const c of candles) { min = Math.min(min, c.low); max = Math.max(max, c.high); }
+    for (const c of liveCandles) { min = Math.min(min, c.low); max = Math.max(max, c.high); }
     for (const [, v] of levels) { min = Math.min(min, v); max = Math.max(max, v); }
     if (!(max > min)) { max = min + Math.max(Math.abs(min) * 0.001, 0.0001); } // v20.3: negative-safe flat guard
     const pad = (max - min) * 0.06;
     min -= pad; max += pad;
-    return { candles, levels, min, max };
-  }, [candles, plan, ltp]);
+    return { candles: liveCandles, levels, min, max };
+  }, [liveCandles, plan, ltp]);
 
   const lvlColor = (name: string) => name === 'SL' ? '#f87171' : name === 'ENTRY' ? '#e2e8f0'
     : name === 'LTP' ? '#fbbf24' : '#34d399';
@@ -228,7 +268,11 @@ export const CandleChart = memo(function CandleChart({
         ))}
         {loading && <span className="text-[9px] text-slate-500">loading…</span>}
         {!loading && err && <span className="text-[9px] text-amber-500/80" title={err}>⚠ {err}</span>}
-        {candles && <span className="ml-auto text-[9px] text-slate-600 font-mono">{candles.length} bars · {tf} · refresh 60s</span>}
+        {candles && (
+          <span className="ml-auto text-[9px] text-slate-600 font-mono">
+            {liveCandles?.length ?? candles.length} bars · {tf} · {Number(ltp) > 0 ? 'live tick' : 'refresh 60s'}
+          </span>
+        )}
         <button onClick={runVisionCheck} disabled={visionBusy || !view}
           title="👁 Vision AI — chart screenshot ko FreeLLMAPI ke pinned multimodal model (qwen2.5-vl-72b) se analyze karo"
           className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${visionBusy ? 'bg-slate-800/40 text-slate-500 border-slate-700/40' : 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-400/40 hover:bg-fuchsia-500/25'}`}>
