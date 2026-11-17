@@ -1,0 +1,81 @@
+# ============================================================
+# SmartAI Pro — .gitignore (v21.36.2 GitHub-connect)
+# ------------------------------------------------------------
+# PRINCIPLE: anything that is a SECRET, live TRADING STATE, a
+# build artifact, or a dependency is EXCLUDED. Only source + docs
+# + templates + config-schemas ship to GitHub. When in doubt,
+# IGNORE — a missed source file is easy to re-add; a committed
+# CoinDCX key or live journal is not recoverable.
+# ============================================================
+
+# --- Node dependencies & build output (regenerated, not source) ---
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+coverage/
+.vite/
+.turbo/
+
+# --- Secrets & credentials — NEVER commit ---
+# the real .env holds APP_PIN / API_TOKEN / CoinDCX keys / LLM provider keys
+.env
+.env.local
+.env.*.local
+# FreeLLMAPI key export dumps (contains live provider keys)
+freellmapi-keys*.json
+*.pem
+*.p12
+id_rsa*
+*.key
+# runtime token + session files (service/session auth material)
+.api-token
+.session-token
+.st3.json
+
+# --- Live trading state & runtime data — NEVER commit ---
+server/data/
+data/
+server-data/
+config/
+/models/
+# ml-service model artifacts stay local; the Python training sources are code
+# and are tracked so the source-contract tests run on a fresh checkout.
+ml-service/models/*
+!ml-service/models/*.py
+telegram-bot/.state.json
+# backup / pre-live snapshots (kept alongside server/data)
+*.bak
+*.pre-live-*.bak
+*.tradeAll-off-*
+# ad-hoc local API snapshots (board/deep/positions/markets/errors) — these are
+# runtime dumps, never source. Keep them on disk for debugging but out of git.
+/.b.json
+/.c.json
+/.deep.json
+/.fw.json
+/.i.json
+/.mk.json
+/.pos.json
+
+# --- Logs & Windows stray artifacts ---
+*.log
+nul
+# local scratch files (auth-cookie jars, vitest JSON dumps) — never source
+/tmp-*
+
+# --- Agent / editor / OS cruft ---
+.claude/
+.DS_Store
+Thumbs.db
+desktop.ini
+# stray nested scratch repo (has its own .git; must not become a broken gitlink)
+/smart27/
+
+# --- Keep the EMPTY templates tracked (they document required vars) ---
+!.env.example
+!telegram-bot/.env.example
+
+# --- Python bytecode ---
+__pycache__/
+*.pyc

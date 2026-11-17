@@ -1,0 +1,857 @@
+{
+  "schema": "smartaipro-baseline/1",
+  "frozenAt": "2026-11-14T17:12:43.211Z",
+  "version": "21.37.0",
+  "gitSha": "unknown",
+  "tag": "v21.37.0-freeze",
+  "dataSource": "server/data/mtf-row-ledger.json",
+  "windowDays": 30,
+  "ledgerRows": 139,
+  "scorecardV2": {
+    "version": 2,
+    "windowDays": 30,
+    "generatedAt": 1794676363080,
+    "overall": {
+      "n": 119,
+      "gate": {
+        "state": "reviewable",
+        "decisionGrade": false,
+        "reviewable": true
+      },
+      "hitTp1Pct": 26.89,
+      "hitTp1WilsonCI": {
+        "lo": 19.74,
+        "hi": 35.49
+      },
+      "hitTp2Pct": 0.84,
+      "stopRatePct": 7.56,
+      "timeoutRatePct": 65.55,
+      "expectancyR": 0.25,
+      "expectancyBootstrapCI": {
+        "lo": 0.14,
+        "hi": 0.36
+      },
+      "profitFactor": 3.08,
+      "medianMfeR": 0.21,
+      "medianMaeR": 0.26,
+      "ece": 0.27,
+      "brier": 0.27,
+      "eceN": 119,
+      "avgTimeToTp1Min": 21,
+      "stabilityPct": 72.27
+    },
+    "byTier": {
+      "ELITE": {
+        "n": 20,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 25,
+        "hitTp1WilsonCI": {
+          "lo": 11.19,
+          "hi": 46.87
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 60,
+        "expectancyR": 0.3,
+        "expectancyBootstrapCI": {
+          "lo": 0.12,
+          "hi": 0.51
+        },
+        "profitFactor": 14.11,
+        "medianMfeR": 0.13,
+        "medianMaeR": 0.02,
+        "ece": 0.25,
+        "brier": 0.25,
+        "eceN": 20,
+        "avgTimeToTp1Min": 10.42,
+        "stabilityPct": 40
+      },
+      "ACTION": {
+        "n": 20,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 20,
+        "hitTp1WilsonCI": {
+          "lo": 8.07,
+          "hi": 41.6
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 80,
+        "expectancyR": 0.3,
+        "expectancyBootstrapCI": {
+          "lo": 0.1,
+          "hi": 0.49
+        },
+        "profitFactor": 5.59,
+        "medianMfeR": 0.29,
+        "medianMaeR": 0.19,
+        "ece": 0.2,
+        "brier": 0.2,
+        "eceN": 20,
+        "avgTimeToTp1Min": 30.3,
+        "stabilityPct": 45
+      },
+      "WATCH": {
+        "n": 97,
+        "gate": {
+          "state": "early",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 23.71,
+        "hitTp1WilsonCI": {
+          "lo": 16.35,
+          "hi": 33.07
+        },
+        "hitTp2Pct": 1.03,
+        "stopRatePct": 9.28,
+        "timeoutRatePct": 49.48,
+        "expectancyR": 0.18,
+        "expectancyBootstrapCI": {
+          "lo": 0.06,
+          "hi": 0.3
+        },
+        "profitFactor": 2.41,
+        "medianMfeR": 0.21,
+        "medianMaeR": 0.28,
+        "ece": 0.24,
+        "brier": 0.24,
+        "eceN": 97,
+        "avgTimeToTp1Min": 21.68,
+        "stabilityPct": 86.6
+      },
+      "STRONG": {
+        "n": 2,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 65.76
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 100,
+        "expectancyR": 0,
+        "expectancyBootstrapCI": {
+          "lo": 0,
+          "hi": 0
+        },
+        "profitFactor": null,
+        "medianMfeR": 0,
+        "medianMaeR": 0,
+        "ece": null,
+        "brier": null,
+        "eceN": 2,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 100
+      }
+    },
+    "byDesk": {
+      "CRYPTO": {
+        "n": 112,
+        "gate": {
+          "state": "reviewable",
+          "decisionGrade": false,
+          "reviewable": true
+        },
+        "hitTp1Pct": 28.57,
+        "hitTp1WilsonCI": {
+          "lo": 21.02,
+          "hi": 37.54
+        },
+        "hitTp2Pct": 0.89,
+        "stopRatePct": 8.04,
+        "timeoutRatePct": 51.79,
+        "expectancyR": 0.25,
+        "expectancyBootstrapCI": {
+          "lo": 0.13,
+          "hi": 0.36
+        },
+        "profitFactor": 3.03,
+        "medianMfeR": 0.32,
+        "medianMaeR": 0.31,
+        "ece": 0.29,
+        "brier": 0.29,
+        "eceN": 112,
+        "avgTimeToTp1Min": 21,
+        "stabilityPct": 80.36
+      },
+      "METALS": {
+        "n": 13,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 22.81
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 84.62,
+        "expectancyR": 0.1,
+        "expectancyBootstrapCI": {
+          "lo": 0,
+          "hi": 0.21
+        },
+        "profitFactor": 6.68,
+        "medianMfeR": 0.14,
+        "medianMaeR": 0.08,
+        "ece": 0,
+        "brier": 0,
+        "eceN": 13,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 61.54
+      },
+      "INDIA": {
+        "n": 14,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 21.53
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 64.29,
+        "expectancyR": 0,
+        "expectancyBootstrapCI": {
+          "lo": 0,
+          "hi": 0
+        },
+        "profitFactor": null,
+        "medianMfeR": 0,
+        "medianMaeR": 0,
+        "ece": 0,
+        "brier": 0,
+        "eceN": 14,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 35.71
+      }
+    },
+    "byRegime": {
+      "SQUEEZE": {
+        "n": 68,
+        "gate": {
+          "state": "early",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 23.53,
+        "hitTp1WilsonCI": {
+          "lo": 15.03,
+          "hi": 34.86
+        },
+        "hitTp2Pct": 1.47,
+        "stopRatePct": 8.82,
+        "timeoutRatePct": 61.76,
+        "expectancyR": 0.2,
+        "expectancyBootstrapCI": {
+          "lo": 0.06,
+          "hi": 0.35
+        },
+        "profitFactor": 2.53,
+        "medianMfeR": 0.16,
+        "medianMaeR": 0.2,
+        "ece": 0.24,
+        "brier": 0.24,
+        "eceN": 68,
+        "avgTimeToTp1Min": 21.91,
+        "stabilityPct": 63.24
+      },
+      "TREND_DOWN": {
+        "n": 56,
+        "gate": {
+          "state": "early",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 28.57,
+        "hitTp1WilsonCI": {
+          "lo": 18.42,
+          "hi": 41.48
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 3.57,
+        "timeoutRatePct": 42.86,
+        "expectancyR": 0.27,
+        "expectancyBootstrapCI": {
+          "lo": 0.13,
+          "hi": 0.41
+        },
+        "profitFactor": 4.74,
+        "medianMfeR": 0.41,
+        "medianMaeR": 0.24,
+        "ece": 0.29,
+        "brier": 0.29,
+        "eceN": 56,
+        "avgTimeToTp1Min": 20.08,
+        "stabilityPct": 89.29
+      },
+      "TREND_UP": {
+        "n": 10,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 27.75
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 80,
+        "expectancyR": 0.05,
+        "expectancyBootstrapCI": {
+          "lo": -0.03,
+          "hi": 0.13
+        },
+        "profitFactor": 3.45,
+        "medianMfeR": 0.04,
+        "medianMaeR": 0.1,
+        "ece": 0,
+        "brier": 0,
+        "eceN": 10,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 60
+      },
+      "HIGH_VOL": {
+        "n": 4,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 48.99
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 100,
+        "expectancyR": 0.29,
+        "expectancyBootstrapCI": {
+          "lo": 0.13,
+          "hi": 0.41
+        },
+        "profitFactor": null,
+        "medianMfeR": 0.52,
+        "medianMaeR": 0.34,
+        "ece": null,
+        "brier": null,
+        "eceN": 4,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 100
+      },
+      "TRANSITION": {
+        "n": 1,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 79.35
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 100,
+        "timeoutRatePct": 0,
+        "expectancyR": -1,
+        "expectancyBootstrapCI": {
+          "lo": -1,
+          "hi": -1
+        },
+        "profitFactor": 0,
+        "medianMfeR": 0.27,
+        "medianMaeR": 1.46,
+        "ece": null,
+        "brier": null,
+        "eceN": 1,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 0
+      }
+    },
+    "bySide": {
+      "SHORT": {
+        "n": 114,
+        "gate": {
+          "state": "reviewable",
+          "decisionGrade": false,
+          "reviewable": true
+        },
+        "hitTp1Pct": 28.07,
+        "hitTp1WilsonCI": {
+          "lo": 20.64,
+          "hi": 36.93
+        },
+        "hitTp2Pct": 0.88,
+        "stopRatePct": 6.14,
+        "timeoutRatePct": 52.63,
+        "expectancyR": 0.27,
+        "expectancyBootstrapCI": {
+          "lo": 0.16,
+          "hi": 0.38
+        },
+        "profitFactor": 3.61,
+        "medianMfeR": 0.32,
+        "medianMaeR": 0.25,
+        "ece": 0.28,
+        "brier": 0.28,
+        "eceN": 114,
+        "avgTimeToTp1Min": 21,
+        "stabilityPct": 78.07
+      },
+      "LONG": {
+        "n": 25,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 13.32
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 8,
+        "timeoutRatePct": 72,
+        "expectancyR": -0.06,
+        "expectancyBootstrapCI": {
+          "lo": -0.19,
+          "hi": 0.04
+        },
+        "profitFactor": 0.4,
+        "medianMfeR": 0,
+        "medianMaeR": 0.08,
+        "ece": 0,
+        "brier": 0,
+        "eceN": 25,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 56
+      }
+    },
+    "bySession": {
+      "weekend": {
+        "n": 139,
+        "gate": {
+          "state": "reviewable",
+          "decisionGrade": false,
+          "reviewable": true
+        },
+        "hitTp1Pct": 23.02,
+        "hitTp1WilsonCI": {
+          "lo": 16.81,
+          "hi": 30.69
+        },
+        "hitTp2Pct": 0.72,
+        "stopRatePct": 6.47,
+        "timeoutRatePct": 56.12,
+        "expectancyR": 0.21,
+        "expectancyBootstrapCI": {
+          "lo": 0.12,
+          "hi": 0.31
+        },
+        "profitFactor": 3.08,
+        "medianMfeR": 0.2,
+        "medianMaeR": 0.22,
+        "ece": 0.23,
+        "brier": 0.23,
+        "eceN": 139,
+        "avgTimeToTp1Min": 21,
+        "stabilityPct": 74.1
+      }
+    },
+    "byTierRegime": {
+      "ELITE|SQUEEZE": {
+        "n": 11,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 27.27,
+        "hitTp1WilsonCI": {
+          "lo": 9.75,
+          "hi": 56.57
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 54.55,
+        "expectancyR": 0.37,
+        "expectancyBootstrapCI": {
+          "lo": 0.13,
+          "hi": 0.64
+        },
+        "profitFactor": 41.5,
+        "medianMfeR": 0.24,
+        "medianMaeR": 0,
+        "ece": 0.27,
+        "brier": 0.27,
+        "eceN": 11,
+        "avgTimeToTp1Min": 15.75,
+        "stabilityPct": 54.55
+      },
+      "ELITE|TREND_DOWN": {
+        "n": 6,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 33.33,
+        "hitTp1WilsonCI": {
+          "lo": 9.68,
+          "hi": 70
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 66.67,
+        "expectancyR": 0.33,
+        "expectancyBootstrapCI": {
+          "lo": -0.03,
+          "hi": 0.73
+        },
+        "profitFactor": 6.5,
+        "medianMfeR": 0.27,
+        "medianMaeR": 0.41,
+        "ece": null,
+        "brier": null,
+        "eceN": 6,
+        "avgTimeToTp1Min": 2.43,
+        "stabilityPct": 33.33
+      },
+      "ACTION|TREND_DOWN": {
+        "n": 6,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 16.67,
+        "hitTp1WilsonCI": {
+          "lo": 3.01,
+          "hi": 56.35
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 83.33,
+        "expectancyR": 0.27,
+        "expectancyBootstrapCI": {
+          "lo": -0.2,
+          "hi": 0.68
+        },
+        "profitFactor": 3.03,
+        "medianMfeR": 0.51,
+        "medianMaeR": 0.19,
+        "ece": null,
+        "brier": null,
+        "eceN": 6,
+        "avgTimeToTp1Min": 24.52,
+        "stabilityPct": 66.67
+      },
+      "WATCH|TREND_DOWN": {
+        "n": 44,
+        "gate": {
+          "state": "early",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 29.55,
+        "hitTp1WilsonCI": {
+          "lo": 18.16,
+          "hi": 44.22
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 4.55,
+        "timeoutRatePct": 34.09,
+        "expectancyR": 0.27,
+        "expectancyBootstrapCI": {
+          "lo": 0.11,
+          "hi": 0.43
+        },
+        "profitFactor": 4.99,
+        "medianMfeR": 0.32,
+        "medianMaeR": 0.24,
+        "ece": 0.3,
+        "brier": 0.3,
+        "eceN": 44,
+        "avgTimeToTp1Min": 22.46,
+        "stabilityPct": 100
+      },
+      "WATCH|TREND_UP": {
+        "n": 7,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 35.43
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 85.71,
+        "expectancyR": 0.07,
+        "expectancyBootstrapCI": {
+          "lo": -0.05,
+          "hi": 0.19
+        },
+        "profitFactor": 3.45,
+        "medianMfeR": 0.07,
+        "medianMaeR": 0.21,
+        "ece": null,
+        "brier": null,
+        "eceN": 7,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 85.71
+      },
+      "WATCH|SQUEEZE": {
+        "n": 41,
+        "gate": {
+          "state": "early",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 24.39,
+        "hitTp1WilsonCI": {
+          "lo": 13.82,
+          "hi": 39.34
+        },
+        "hitTp2Pct": 2.44,
+        "stopRatePct": 14.63,
+        "timeoutRatePct": 56.1,
+        "expectancyR": 0.13,
+        "expectancyBootstrapCI": {
+          "lo": -0.1,
+          "hi": 0.34
+        },
+        "profitFactor": 1.62,
+        "medianMfeR": 0.12,
+        "medianMaeR": 0.31,
+        "ece": 0.24,
+        "brier": 0.24,
+        "eceN": 41,
+        "avgTimeToTp1Min": 20.66,
+        "stabilityPct": 73.17
+      },
+      "ACTION|SQUEEZE": {
+        "n": 14,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 21.43,
+        "hitTp1WilsonCI": {
+          "lo": 7.57,
+          "hi": 47.59
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 78.57,
+        "expectancyR": 0.31,
+        "expectancyBootstrapCI": {
+          "lo": 0.09,
+          "hi": 0.54
+        },
+        "profitFactor": 9.57,
+        "medianMfeR": 0.24,
+        "medianMaeR": 0.17,
+        "ece": 0.21,
+        "brier": 0.21,
+        "eceN": 14,
+        "avgTimeToTp1Min": 32.23,
+        "stabilityPct": 35.71
+      },
+      "ELITE|TREND_UP": {
+        "n": 3,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 56.15
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 66.67,
+        "expectancyR": 0,
+        "expectancyBootstrapCI": {
+          "lo": 0,
+          "hi": 0
+        },
+        "profitFactor": null,
+        "medianMfeR": 0,
+        "medianMaeR": 0,
+        "ece": null,
+        "brier": null,
+        "eceN": 3,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 0
+      },
+      "STRONG|SQUEEZE": {
+        "n": 2,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 65.76
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 100,
+        "expectancyR": 0,
+        "expectancyBootstrapCI": {
+          "lo": 0,
+          "hi": 0
+        },
+        "profitFactor": null,
+        "medianMfeR": 0,
+        "medianMaeR": 0,
+        "ece": null,
+        "brier": null,
+        "eceN": 2,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 100
+      },
+      "WATCH|HIGH_VOL": {
+        "n": 4,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 48.99
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 0,
+        "timeoutRatePct": 100,
+        "expectancyR": 0.29,
+        "expectancyBootstrapCI": {
+          "lo": 0.13,
+          "hi": 0.41
+        },
+        "profitFactor": null,
+        "medianMfeR": 0.52,
+        "medianMaeR": 0.34,
+        "ece": null,
+        "brier": null,
+        "eceN": 4,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 100
+      },
+      "WATCH|TRANSITION": {
+        "n": 1,
+        "gate": {
+          "state": "insufficient",
+          "decisionGrade": false,
+          "reviewable": false
+        },
+        "hitTp1Pct": 0,
+        "hitTp1WilsonCI": {
+          "lo": 0,
+          "hi": 79.35
+        },
+        "hitTp2Pct": 0,
+        "stopRatePct": 100,
+        "timeoutRatePct": 0,
+        "expectancyR": -1,
+        "expectancyBootstrapCI": {
+          "lo": -1,
+          "hi": -1
+        },
+        "profitFactor": 0,
+        "medianMfeR": 0.27,
+        "medianMaeR": 1.46,
+        "ece": null,
+        "brier": null,
+        "eceN": 1,
+        "avgTimeToTp1Min": null,
+        "stabilityPct": 0
+      }
+    },
+    "totalScans": 139,
+    "resolvedCount": 119,
+    "pendingCount": 20,
+    "schemaVersionCoverage": {
+      "v2": 139,
+      "legacy": 0
+    },
+    "pWinCoveragePct": 100,
+    "note": "Scorecard v2 — definitions frozen in docs/ACCURACY-DEFINITIONS.md. min-n gates: <30 insufficient, >=100 reviewable, >=150 decision-grade."
+  },
+  "legacyScorecard": {
+    "n": 119,
+    "directionHitRate": 63.87,
+    "t1HitPct": 26.89,
+    "avgR": 0.25,
+    "wilsonLB": 19.74,
+    "byTier": {
+      "ACTION": {
+        "n": 20,
+        "tp1HitPct": 20,
+        "expectancyR": 0.3,
+        "avgMfeR": 0.48,
+        "avgMaeR": 0.26
+      },
+      "ELITE": {
+        "n": 20,
+        "tp1HitPct": 25,
+        "expectancyR": 0.3,
+        "avgMfeR": 0.45,
+        "avgMaeR": 0.15
+      },
+      "STRONG": {
+        "n": 2,
+        "tp1HitPct": 0,
+        "expectancyR": 0,
+        "avgMfeR": 0,
+        "avgMaeR": 0
+      },
+      "WATCH": {
+        "n": 97,
+        "tp1HitPct": 23.71,
+        "expectancyR": 0.18,
+        "avgMfeR": 0.46,
+        "avgMaeR": 0.4
+      }
+    }
+  },
+  "compareRule": "Har baad ka change (flag flip, feature, exit change) isi baseline ke overall + byTier slices se compare hoga. Promotion ke liye: lower 95% CI bound > 0 at n>=150 (KPI §6)."
+}
