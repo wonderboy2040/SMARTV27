@@ -19,7 +19,7 @@ import path from 'node:path';
 const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'mtf-fidelity-21370-'));
 process.env.MTF_AUTO_DATA_DIR = TMP_DATA;
 
-import { mtfAutoTick, mtfAutoStatus, __resetMtfAutoForTests } from '../server/ai/mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, __resetMtfAutoForTests, loadMtfAutoConfig } from '../server/ai/mtfAutoLink.js';
 import { __resetDirectionLocksForTests } from '../server/ai/directionLock.js';
 import {
   evaluateSignalFidelity, evaluateLossChurnLock,
@@ -356,14 +356,32 @@ function eventText() {
 describe('v21.37.0 — tick wiring (fidelity + churn)', () => {
   beforeEach(() => { __resetMtfAutoForTests(); __resetDirectionLocksForTests(); });
 
-  it('default scope `live` leaves the paper lane untouched (CHOP still opens)', async () => {
+  it('legacy parity OFF: default scope `live` leaves the paper lane untouched (CHOP still opens)', async () => {
     __resetMtfAutoForTests({
-      config: { enabled: true, executionMode: 'paper', desks: { india: false, crypto: true } },
+      config: {
+        enabled: true, executionMode: 'paper', desks: { india: false, crypto: true },
+        // v21.38.0: `paperLiveParity` now defaults ON. This test pins the
+        // LEGACY contract (operator explicitly opted out) — scope `live`
+        // must still leave paper untouched when parity is disabled.
+        paperLiveParity: false,
+      },
     });
     const { paper, calls } = fakePaper();
     const out = await mtfAutoTick(tickP(paper, chopRow()));
     expect(out.opened).toHaveLength(1);
     expect(calls.opened).toHaveLength(1);
+  });
+
+  it('v21.38.0 default parity ON: the paper lane is blocked by the same CHOP fidelity veto as live', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'paper', desks: { india: false, crypto: true } },
+    });
+    expect(loadMtfAutoConfig().paperLiveParity).toBe(true);
+    const { paper, calls } = fakePaper();
+    const out = await mtfAutoTick(tickP(paper, chopRow()));
+    expect(out.opened).toHaveLength(0);
+    expect(calls.opened).toHaveLength(0);
+    expect(out.skipped.join(' ')).toMatch(/signal fidelity blocked.*CHOP regime/);
   });
 
   it('scope `all` enforces the CHOP fidelity veto in paper', async () => {

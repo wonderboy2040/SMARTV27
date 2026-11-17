@@ -174,6 +174,9 @@ import { getTick as _getTick, subscribe as subscribeLiveFeed } from '../liveFeed
 import {
   startSignalRecheckLoop, signalRecheckStatus, buildTickStoreResolver, recheckEnabled as _recheckEnabled,
 } from './signalRecheck.js';
+// v21.38.0 [PRE-ENTRY RECHECK] — pure shared gate for manual PAPER/LIVE board
+// buttons (same module the auto lane uses; see preEntryGate.js).
+import { preEntryRecheck } from './preEntryGate.js';
 // v18.6.4: 30s TV-batch micro-cache for the tracker's India fallback —
 // the 5s poll no longer fires an uncached TV scanner POST per cycle.
 const _tvIndiaBatchCache = new Map();
@@ -235,7 +238,7 @@ import { buildAccuracyDashboard } from './accuracyDashboard.js';
 import { flagMatrixSnapshot, applyFlagChange } from './championChallenger.js';
 // v21.32.0 [PHASE B3]: latency P50/P95 lanes (honest upstream-feed measurement).
 import { latencyRecorder } from './lib/latencyStats.js';
-import { mtfAutoTick, mtfAutoStatus, mtfAutoRiskArmState, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, metalsSymbolOf, metalsEntryGate, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, mtfAutoRiskArmState, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, metalsSymbolOf, metalsEntryGate, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason, preEntryRecheckMode } from './mtfAutoLink.js';
 import { startSniper, stopSniper, sniperStatus } from './sniperEntryEngine.js';
 // v21.29.0 [R2 RISK ARM] — arm blockers / typed override / SAFE preset.
 import { RISK_ACK_PHRASE, evaluateLiveArmRisk, evaluateLiveArmConfigPatch, describeDeskArmState } from './riskArm.js';
@@ -1038,6 +1041,39 @@ export function registerAITradingRoutes(app, deps) {
     } catch { return null; }
   };
 
+  // v21.38.0 [PRE-ENTRY RECHECK] — one pure verdict for both manual board
+  // buttons. The auto lane already runs this before sizing; a manual click
+  // must never be able to place a ticket the engine would reject (stale plan,
+  // late chase, reversal, structure break, MTF↔DEEP HOLD/conflict). Missing
+  // data fails OPEN; `shadow` returns telemetry without blocking.
+  const mtfPreEntryVerdict = async ({ row, side, market, now = Date.now() }) => {
+    const cfg = loadMtfAutoConfig();
+    const mode = preEntryRecheckMode();
+    if (mode === 'off') return { mode, verdict: null };
+    const baseSym = normalizeLinkSymbol(row?.symbol, market) || String(row?.symbol || '').toUpperCase();
+    const usd = market === 'CRYPTO' || market === 'FUTURES' || market === 'METALS' || market === 'GLOBALFUTURES';
+    let quote = Number(row?.ltp) > 0 ? Number(row.ltp) : null;
+    if (usd && market !== 'GLOBALFUTURES') {
+      const m = await mtfUsdtQuoteMap().catch(() => null);
+      const px = m?.get(baseSym);
+      if (px > 0) quote = px;
+    }
+    const verdict = preEntryRecheck({
+      row,
+      side,
+      livePrice: quote,
+      now,
+      requireVerified: true,
+      requireDeepAligned: true,
+      thresholds: {
+        maxChaseRiskRatio: Number(cfg.preEntryMaxChaseRiskRatio) || 0.25,
+        maxAdverseRiskRatio: Number(cfg.preEntryMaxAdverseRiskRatio) || 0.20,
+        maxRowAgeMs: Number(cfg.preEntryMaxRowAgeMs) || 120_000,
+      },
+    });
+    return { mode, verdict, quote };
+  };
+
   // ---------------- v21.16.0 MTF SIGNALS BOARD (DUAL-TIMEFRAME) ----------------
   // Board ke signals par dual-TF superintelligence: context (deep) TF trend +
   // trigger (action) TF breakout + plan confidence + 6TF extended bias + board
@@ -1193,6 +1229,17 @@ export function registerAITradingRoutes(app, deps) {
         const htfMsg = `${symbol}: PAPER ${row.side} blocked — 1d+4h HTF bias ${row.htfBias || 'opposite'} is against this side (counter-HTF, capped WATCH)`;
         return res.status(409).json({ ok: false, blocked: true, error: htfMsg, reason: htfMsg });
       }
+      // v21.38.0 [PRE-ENTRY RECHECK]: fresh-quote revalidation of the exact
+      // thesis before the ticket is registered anywhere. Same gate as auto.
+      const preGate = await mtfPreEntryVerdict({ row, side: normalizeSide(row.side), market });
+      if (preGate.mode === 'enforce' && preGate.verdict && preGate.verdict.ok !== true) {
+        const why = preGate.verdict.blockers.join(' | ');
+        const preMsg = `${symbol}: PAPER ${row.side} blocked — pre-entry recheck: ${why}`;
+        return res.status(409).json({
+          ok: false, blocked: true, error: preMsg, reason: preMsg,
+          blockers: preGate.verdict.blockers, preEntry: preGate.verdict,
+        });
+      }
       // v21.25.0 EXPLICIT DIRECTION CERTIFICATE — the paper ticket must prove
       // LONG→buy / SHORT→sell, SL/target polarity and no activePos conflict
       // before it is registered anywhere.
@@ -1315,6 +1362,10 @@ export function registerAITradingRoutes(app, deps) {
         orderSide: directionCertificate.orderSide,
         signalToOrder: `${rowSide} → ${directionCertificate.orderSideLabel}`,
         directionCertificate,
+        preEntry: preGate.verdict ? {
+          ok: preGate.verdict.ok, state: preGate.verdict.state,
+          warnings: preGate.verdict.warnings, metrics: preGate.verdict.metrics,
+        } : null,
         row: {
           symbol, side: rowSide, orderSide: directionCertificate.orderSide,
           signalToOrder: `${rowSide} → ${directionCertificate.orderSideLabel}`,
@@ -1404,6 +1455,17 @@ export function registerAITradingRoutes(app, deps) {
       if (row.trapVeto || row.zoneWallVeto || row.reversalRisk || row.trigger?.opposingFlow) {
         const vetoMsg = `${symbol}: ${row.trapVeto ? 'Liquidity Sweep Trap Veto' : row.zoneWallVeto ? 'Fresh Supply/Demand Zone Wall Veto' : 'Active Bar Reversal / Exhaustion Risk'} detected — entry blocked`;
         return res.status(409).json({ ok: false, blocked: true, error: vetoMsg, reason: vetoMsg });
+      }
+      // v21.38.0 [PRE-ENTRY RECHECK]: the same pure gate the auto lane runs —
+      // fresh quote vs planned entry/SL/T1, real ATR, deep verdict, staleness.
+      const preGate = await mtfPreEntryVerdict({ row, side, market });
+      if (preGate.mode === 'enforce' && preGate.verdict && preGate.verdict.ok !== true) {
+        const why = preGate.verdict.blockers.join(' | ');
+        const preMsg = `${symbol}: LIVE ${side} blocked — pre-entry recheck: ${why}`;
+        return res.status(409).json({
+          ok: false, blocked: true, error: preMsg, reason: preMsg,
+          blockers: preGate.verdict.blockers, preEntry: preGate.verdict,
+        });
       }
       const pEntry = Number(row.plan?.entry);
       const pSl = Number(row.plan?.stopLoss);
@@ -1545,6 +1607,10 @@ export function registerAITradingRoutes(app, deps) {
           signalToOrder: `${side} → ${(liveOut.orderSide || directionCertificate.orderSide || 'no-order').toUpperCase()}`,
           directionCertificate: liveOut.directionCertificate || directionCertificate,
           signalCertificate: directionCertificate,
+          preEntry: preGate.verdict ? {
+            ok: preGate.verdict.ok, state: preGate.verdict.state,
+            warnings: preGate.verdict.warnings, metrics: preGate.verdict.metrics,
+          } : null,
           row: {
             symbol: baseSym, side, orderSide: liveOut.orderSide || directionCertificate.orderSide,
             signalToOrder: `${side} → ${(liveOut.orderSide || directionCertificate.orderSide || 'no-order').toUpperCase()}`,
@@ -1615,6 +1681,10 @@ export function registerAITradingRoutes(app, deps) {
         orderSide: directionCertificate.orderSide,
         signalToOrder: `${side} → ${directionCertificate.orderSideLabel}`,
         directionCertificate,
+        preEntry: preGate.verdict ? {
+          ok: preGate.verdict.ok, state: preGate.verdict.state,
+          warnings: preGate.verdict.warnings, metrics: preGate.verdict.metrics,
+        } : null,
         row: {
           symbol: baseSym, side, orderSide: directionCertificate.orderSide,
           signalToOrder: `${side} → ${directionCertificate.orderSideLabel}`,

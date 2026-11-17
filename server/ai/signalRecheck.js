@@ -42,6 +42,7 @@
 import { liveInvalidationCheck } from './superIntel.js';
 import { normalizeSide } from './directionCertificate.js';
 import { getActiveAutoTradesDeepMonitor } from './mtfAutoLink.js';
+import { preEntryRecheck, resolveRowAtr } from './preEntryGate.js';
 
 /** Watchdog cadence for board refresh + deep re-vote + REST fallback. */
 export const RECHECK_WATCHDOG_MS = 30_000;
@@ -63,6 +64,8 @@ export const EXPIRED_KEEP_MS = 5 * 60_000;
 export const TICK_STALE_MS = 45_000;
 /** ADRIFT threshold: price this many ATRs against the signal = WEAKENING. */
 export const ADVERSE_ATR_X = 0.75;
+/** v21.38.0: soft ATR band — under water but not yet a hard weakening. */
+export const CAUTION_ATR_X = 0.5;
 
 const GRADE_RANK = { NEUTRAL: 0, WATCH: 1, ACTION: 2, STRONG: 3 };
 const _num = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
@@ -107,7 +110,16 @@ export function selectWatchlist(boards) {
         target1: _num(s.plan?.target1),
         target2: _num(s.plan?.target2),
         atr: _num(s.plan?.atrUsed),
+        // v21.38.0 [REAL ATR + STRUCTURE]: the watch row now carries the
+        // same shape the pre-entry gate consumes. Missing fields stay null
+        // (fail-open) — never fabricated.
+        atrPct: _num(s.plan?.atrPct),
+        triggerLevel: _num(s.plan?.triggerLevel),
+        triggerFired: s.triggerFired === true,
+        directionVerified: s.directionVerified === true ? true : (s.directionVerified === false ? false : null),
+        finalVerdict: s.finalVerdict && typeof s.finalVerdict === 'object' ? s.finalVerdict : null,
         boardAt: _num(s.generatedAt) || null,
+        builtAt: _num(s.generatedAt) ?? _num(s.builtAt) ?? null,
       };
       const prev = out.get(key);
       if (!prev || (grade === 'STRONG' && prev.grade !== 'STRONG')) out.set(key, row);
@@ -155,17 +167,40 @@ export function recheckRow(row, liveLtp) {
     return { state: 'TARGET_1', reason: 'T1 touched — 40% book + SL breakeven zone', ltp: px, movePct: _movePct(row, px, long) };
   }
 
-  // 3) adverse drift (not yet SL, but the thesis is under water)
-  const atr = (_num(row.atr) > 0 ? _num(row.atr) : (_num(row.entry) > 0 ? _num(row.entry) * 0.012 : null));
+  // 3) structure break — the trigger level the entry broke is lost again.
+  //    Only meaningful for rows that actually fired (triggerFired) and carry
+  //    a level; old board rows without the field stay on the legacy path.
+  //    v21.38.0: a 0.05×ATR buffer keeps a wick from stamping the state.
+  const atr = resolveRowAtr(row);
   const entry = _num(row.entry);
-  if (atr != null && atr > 0 && entry != null && entry > 0) {
-    const adverse = long ? (entry - px) : (px - entry);
-    if (adverse > ADVERSE_ATR_X * atr) {
-      return { state: 'WEAKENING', reason: `price ${Math.round(adverse / atr * 100) / 100}×ATR against the signal — recheck before entry`, ltp: px, movePct: _movePct(row, px, long) };
+  const triggerLevel = _num(row.triggerLevel);
+  if (row?.triggerFired === true && triggerLevel != null && triggerLevel > 0
+    && atr != null && atr > 0) {
+    const buffer = atr * 0.05;
+    const broke = long ? px < triggerLevel - buffer : px > triggerLevel + buffer;
+    if (broke) {
+      return {
+        state: 'STRUCTURE_BREAK',
+        reason: `trigger level ${triggerLevel} lost (live ${px} ${long ? 'below' : 'above'}) — breakout structure fail`,
+        ltp: px, movePct: _movePct(row, px, long), atr,
+      };
     }
   }
 
-  return { state: 'OK', reason: '', ltp: px, movePct: _movePct(row, px, long) };
+  // 4) adverse drift (not yet SL, but the thesis is under water).
+  //    v21.38.0: real ATR (atrPct / risk÷ATR-mult) instead of the old
+  //    unconditional entry×1.2% fallback that made WEAKENING fire late.
+  if (atr != null && atr > 0 && entry != null && entry > 0) {
+    const adverse = long ? (entry - px) : (px - entry);
+    if (adverse > ADVERSE_ATR_X * atr) {
+      return { state: 'WEAKENING', reason: `price ${Math.round(adverse / atr * 100) / 100}×ATR against the signal — recheck before entry`, ltp: px, movePct: _movePct(row, px, long), atr };
+    }
+    if (adverse > CAUTION_ATR_X * atr) {
+      return { state: 'CAUTION', reason: `price ${Math.round(adverse / atr * 100) / 100}×ATR against the signal — momentum fading`, ltp: px, movePct: _movePct(row, px, long), atr };
+    }
+  }
+
+  return { state: 'OK', reason: '', ltp: px, movePct: _movePct(row, px, long), atr };
 }
 
 function _movePct(row, px, long) {
@@ -196,9 +231,9 @@ export function detectTransition(prev, next) {
  *  sticky-worthy; OK-after-bad = RECOVERED). */
 export function priceStateTransition(prevState, nextState) {
   if (prevState === nextState) return null;
-  if (nextState === 'INVALIDATED' || nextState === 'FLIPPED') return nextState;
+  if (nextState === 'INVALIDATED' || nextState === 'FLIPPED' || nextState === 'STRUCTURE_BREAK') return nextState;
   if (nextState === 'TARGET_1' || nextState === 'TARGET_2') return nextState;
-  if ((prevState === 'WEAKENING' || prevState === 'INVALIDATED') && nextState === 'OK') return 'RECOVERED';
+  if ((prevState === 'WEAKENING' || prevState === 'INVALIDATED' || prevState === 'STRUCTURE_BREAK' || prevState === 'CAUTION') && nextState === 'OK') return 'RECOVERED';
   return null;
 }
 
@@ -206,6 +241,7 @@ export function priceStateTransition(prevState, nextState) {
 const _evEmoji = {
   NEW: '🆕', INVALIDATED: '🚨', FLIPPED: '🔄', DEMOTED: '⚠️',
   PROMOTED: '📈', TARGET_1: '🎯', TARGET_2: '🏆', RECOVERED: '✅',
+  STRUCTURE_BREAK: '🧱',
   // v20.9.2 UCV-A1 (ultrafast chart verification transitions)
   UC_REJECTED: '⚡', UC_CONFIRMED: '🛡',
 };
@@ -218,6 +254,7 @@ const _evLabel = {
   TARGET_1: 'T1 TOUCHED',
   TARGET_2: 'T2 TOUCHED',
   RECOVERED: 'SIGNAL RECOVERED',
+  STRUCTURE_BREAK: 'STRUCTURE BREAK — TRIGGER LEVEL LOST',
   // v20.9.2 UCV-A1 — the realtime ultrafast chart re-checked the
   // direction (the "pakka long jayega?" answer flipped states).
   UC_REJECTED: 'ULTRAFAST CHART REJECTED THE DIRECTION',
@@ -236,6 +273,7 @@ export function formatRecheckEvent(type, row, detail = {}) {
     `${desk} · <b>${row.symbol}</b> ${detail.side || row.side}${gradeLine}${pxLine}`,
     `15s recheck loop watch me hai — board refresh se pehle hi pakda gaya.`,
     ...(type === 'INVALIDATED' ? ['Plan stale hai — is signal par entry MAT karo.'] : []),
+    ...(type === 'STRUCTURE_BREAK' ? ['Trigger structure toot gaya — breakout thesis invalid, entry MAT karo.'] : []),
     ...(type === 'FLIPPED' ? ['Committee ab opposite side vote kar rahi hai — purana plan invalid.'] : []),
     // v20.9.2: the UCV-A1 transition lines — the direct answer to
     // "ye signal pakka apni direction me jayega?"
@@ -325,7 +363,7 @@ export function mergeWatchlist(watch) {
     if (!prev) {
       _state.rows.set(key, {
         ...w, firstSeenAt: now, lastCheckAt: null, lastDeepAt: null, checks: 0,
-        ltp: null, ltpAt: null, ltpSrc: null, state: 'PENDING', reason: '', movePct: null, events: [],
+        ltp: null, ltpAt: null, ltpSrc: null, state: 'PENDING', stateSinceAt: now, reason: '', movePct: null, preEntry: null, events: [],
       });
       _recordEvent('NEW', w, { side: w.side, grade: w.grade, ltp: w.entry, reason: `${w.grade} grade board pe detect hua — 15s watch shuru` });
       continue;
@@ -347,7 +385,11 @@ export function mergeWatchlist(watch) {
     Object.assign(prev, {
       side: w.side, grade: w.grade, confidence: w.confidence, aiScore: w.aiScore,
       entry: w.entry, stopLoss: w.stopLoss, target1: w.target1, target2: w.target2,
-      atr: w.atr, boardAt: w.boardAt,
+      atr: w.atr, atrPct: w.atrPct ?? null, triggerLevel: w.triggerLevel ?? null,
+      triggerFired: w.triggerFired === true,
+      directionVerified: w.directionVerified ?? null,
+      finalVerdict: w.finalVerdict ?? null,
+      boardAt: w.boardAt, builtAt: w.builtAt ?? prev.builtAt ?? null,
       ...(sideFlipped ? { ultrafastVerdict: null, ultrafastAnswer: null } : {}),
     });
     if (prev.state === 'EXPIRED') prev.state = 'PENDING';
@@ -379,11 +421,33 @@ function _applyPriceToRow(row, price, at, src) {
   const hadLtp = row.ltp != null;
   row.ltp = rc.ltp ?? row.ltp;
   row.movePct = rc.movePct;
+  row.resolvedAtr = rc.atr ?? row.resolvedAtr ?? null;
   if (rc.ltp != null) { row.ltpAt = at; row.ltpSrc = src || null; }
   const prevPriceState = row.state;
   row.state = rc.state;
   row.reason = rc.reason;
+  if (prevPriceState !== rc.state) row.stateSinceAt = at;
   row.lastCheckAt = at;
+  // v21.38.0 ENTRY VERDICT TELEMETRY — the same pure gate the executors use,
+  // evaluated on every recheck so the panel shows WHY an entry is blocked
+  // (chase / reversal / structure / deep conflict) instead of a bare LTP.
+  try {
+    const pre = preEntryRecheck({
+      row,
+      side: row.side,
+      livePrice: rc.ltp ?? row.ltp,
+      now: at,
+      requireVerified: row.fromMtfDualBoard === true || row.isAutoTrade === true,
+      requireDeepAligned: true,
+    });
+    row.preEntry = {
+      ok: pre.ok,
+      state: pre.state,
+      blockers: pre.blockers.slice(0, 5),
+      warnings: pre.warnings.slice(0, 3),
+      metrics: pre.metrics,
+    };
+  } catch { /* telemetry only — never kills the recheck */ }
   const ev = priceStateTransition(prevPriceState, rc.state);
   if (ev && hadLtp) {
     _recordEvent(ev, row, { ltp: rc.ltp, reason: rc.reason, cur: _curOf(row.market) });
@@ -478,7 +542,17 @@ export async function recheckTick(now = Date.now()) {
             const wKey = `${mktKey}:${symUp}`;
             const mappedGrade = (tier === 'ELITE' || tier === 'STRONG' || score >= 80) ? 'STRONG' : 'ACTION';
             const prev = watch.get(wKey);
-            if (!prev || (mappedGrade === 'STRONG' && prev.grade !== 'STRONG') || (score > (prev.aiScore || 0))) {
+            const prevIsMtf = prev?.fromMtfDualBoard === true;
+            const fresher = (Number(mr.asOf) || 0) >= (Number(prev?.boardAt) || 0);
+            const better = !prev
+              || (mappedGrade === 'STRONG' && prev.grade !== 'STRONG')
+              || (score > (prev.aiScore || 0));
+            // v21.38.0 [STALE-LEVELS FIX]: an MTF watch row used to keep the
+            // FIRST-seen entry/SL for the whole day (equal score → no update),
+            // so the 15s recheck evaluated a plan the board had long replaced.
+            // A fresher MTF row now always refreshes the thesis fields.
+            if (better || (prevIsMtf && fresher)) {
+              const atrPct = _num(mr.context?.atrPct);
               watch.set(wKey, {
                 market: mktKey,
                 symbol: symUp,
@@ -490,8 +564,16 @@ export async function recheckTick(now = Date.now()) {
                 stopLoss: _num(mr.plan?.stopLoss),
                 target1: _num(mr.plan?.t1),
                 target2: _num(mr.plan?.t2),
+                // v21.38.0: REAL volatility, never the old `atr: null` →
+                // entry×1.2% fallback. atrPct is what tradePlanner computed.
                 atr: null,
+                atrPct: atrPct,
+                triggerLevel: _num(mr.triggerLevel ?? mr.plan?.triggerLevel),
+                triggerFired: mr.triggerFired === true,
+                directionVerified: mr.directionVerified === true,
+                finalVerdict: mr.finalVerdict && typeof mr.finalVerdict === 'object' ? mr.finalVerdict : null,
                 boardAt: _num(mr.asOf) || now,
+                builtAt: _num(mr.asOf) || now,
                 fromMtfDualBoard: true,
               });
             }
@@ -522,7 +604,12 @@ export async function recheckTick(now = Date.now()) {
           target1: at.t1,
           target2: at.t2,
           atr: null,
+          atrPct: _num(at.atrPct),
+          triggerLevel: _num(at.triggerLevel),
+          triggerFired: true,
+          directionVerified: at.directionVerified === true ? true : null,
           boardAt: at.openedAt || now,
+          builtAt: at.openedAt || now,
           isAutoTrade: true,
         });
       } else {
@@ -691,6 +778,19 @@ export function signalRecheckStatus() {
       ltp: r.ltp ?? autoMon?.ltp ?? null, ltpAt: r.ltpAt ?? null, ltpAgeS: r.ltpAt ? Math.max(0, Math.round((now - r.ltpAt) / 1000)) : null,
       ltpSrc: r.ltpSrc || null, movePct: r.movePct ?? null,
       state: r.state, reason: r.reason || '',
+      stateAgeS: r.stateSinceAt ? Math.max(0, Math.round((now - r.stateSinceAt) / 1000)) : null,
+      // v21.38.0: real resolved ATR + the live pre-entry verdict (WHY an entry
+      // is blocked right now — chase / reversal / structure / deep conflict).
+      atr: r.resolvedAtr ?? r.atr ?? null,
+      atrPct: r.atrPct ?? null,
+      triggerLevel: r.triggerLevel ?? null,
+      triggerFired: r.triggerFired === true,
+      entryVerdict: r.preEntry?.state ?? null,
+      entryOk: r.preEntry?.ok ?? null,
+      entryBlockers: r.preEntry?.blockers ?? [],
+      entryWarnings: r.preEntry?.warnings ?? [],
+      entryMetrics: r.preEntry?.metrics ?? null,
+      finalVerdict: r.finalVerdict ?? null,
       // v20.9.2 UCV-A1 — the realtime ultrafast chart verdict on the row
       ultrafast: r.ultrafastVerdict || null,
       ultrafastAnswer: r.ultrafastAnswer || null,
@@ -704,7 +804,7 @@ export function signalRecheckStatus() {
     };
   });
   // panel ordering: Active Auto-Trades first, then problems, then by grade, then by recency
-  const stateRank = { INVALIDATED: 0, FLIPPED: 0, WEAKENING: 1, TARGET_2: 2, TARGET_1: 2, PENDING: 3, OK: 4, EXPIRED: 5 };
+  const stateRank = { INVALIDATED: 0, FLIPPED: 0, STRUCTURE_BREAK: 1, WEAKENING: 1, TARGET_2: 2, TARGET_1: 2, CAUTION: 3, PENDING: 3, OK: 4, EXPIRED: 5 };
   rows.sort((a, b) => (b.isAutoTrade ? 1 : 0) - (a.isAutoTrade ? 1 : 0)
     || (stateRank[a.state] ?? 3) - (stateRank[b.state] ?? 3)
     || (b.grade === 'STRONG' ? 1 : 0) - (a.grade === 'STRONG' ? 1 : 0)

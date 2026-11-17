@@ -465,6 +465,7 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
         {
           ok: true, symbol: 'BTCUSDT', market: 'CRYPTO', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
           superScore: 88, tier: 'STRONG', side: 'LONG', dir: 1, grade: 'A',
+          directionVerified: true, directionVerdict: 'VERIFIED',
           triggerFired: true, dualAligned: true, counterTrend: false, tfFit: 'OK',
           autoEligible: true, autoBlockers: [],
           plan: { entry: 100, stopLoss: 99, t1: 101, t2: 102 },
@@ -472,6 +473,7 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
         {
           ok: true, symbol: 'ETHUSDT', market: 'CRYPTO', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
           superScore: 84, tier: 'STRONG', side: 'SHORT', dir: -1, grade: 'A',
+          directionVerified: true, directionVerdict: 'VERIFIED',
           triggerFired: true, dualAligned: true, counterTrend: false, tfFit: 'OK',
           autoEligible: true, autoBlockers: [],
           plan: { entry: 50, stopLoss: 51, t1: 49, t2: 48 },
@@ -496,6 +498,7 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
     const mk = (sym, px) => ({
       ok: true, symbol: sym, market: 'CRYPTO', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
       superScore: 86, tier: 'STRONG', side: 'LONG', dir: 1, grade: 'A',
+      directionVerified: true, directionVerdict: 'VERIFIED',
       triggerFired: true, dualAligned: true, counterTrend: false, tfFit: 'OK',
       autoEligible: true, autoBlockers: [],
       plan: { entry: px, stopLoss: px - 1, t1: px + 1, t2: px + 2 },
@@ -640,6 +643,10 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
       config: {
         enabled: true, executionMode: 'paper', multiTradeMode: true, maxConcurrentTrades: 3,
         universalTradeAll: true, universalLiveFloor: 50,
+        // v21.38.0: this test pins the PAPER-floor contract; the new default
+        // `paperLiveParity` intentionally applies fidelity to paper and would
+        // block this 60-score row on family minScore (65). Opt out explicitly.
+        paperLiveParity: false,
         desks: { india: false, crypto: true },
       },
     });
@@ -652,6 +659,7 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
     const mk = (sym, px) => ({
       ok: true, symbol: sym, market: 'CRYPTO', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
       superScore: 60, tier: 'WATCH', side: 'LONG', dir: 1, grade: 'A',
+      directionVerified: true, directionVerdict: 'VERIFIED',
       triggerFired: true, ensembleSignalAvailable: true, dualAligned: true,
       counterTrend: false, tfFit: 'OK',
       autoEligible: true,
@@ -715,6 +723,7 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
     const mk = (sym, px, score) => ({
       ok: true, symbol: sym, market: 'CRYPTO', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
       superScore: score, tier: 'STRONG', side: 'LONG', dir: 1, grade: 'A',
+      directionVerified: true, directionVerdict: 'VERIFIED',
       triggerFired: true, dualAligned: true, counterTrend: false, tfFit: 'OK',
       autoEligible: true, autoBlockers: [],
       plan: { entry: px, stopLoss: px - 1, t1: px + 1, t2: px + 2 },

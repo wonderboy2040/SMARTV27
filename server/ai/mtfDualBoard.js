@@ -1739,8 +1739,10 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
         deepWarmFire(mkt, r.symbol, deepFor); // fire-and-forget — the board NEVER awaits this
         deepMeta.warming += 1;
       }
-      if (fused.decision === 'STAND_ASIDE') {
-        const blocker = `DEEP-ENSEMBLE ENGINE CONFLICT: MTF ${fused.mtf.side} vs DEEP ${fused.deep.side} — STAND ASIDE (combined verdict v21.36.6)`;
+      if (fused.decision === 'STAND_ASIDE' || fused.decision === 'HOLD') {
+        const blocker = fused.decision === 'STAND_ASIDE'
+          ? `DEEP-ENSEMBLE ENGINE CONFLICT: MTF ${fused.mtf.side} vs DEEP ${fused.deep.side} — STAND ASIDE (combined verdict v21.38.0)`
+          : `DEEP-ENSEMBLE HOLD: ${fused.reason || 'deep SVA/council veto'} (combined verdict v21.38.0)`;
         r.autoBlockers = Array.from(new Set([...(Array.isArray(r.autoBlockers) ? r.autoBlockers : []), blocker]));
         r.autoEligible = false;
       }
@@ -2053,6 +2055,22 @@ export function mtfProEntryGate(row, {
   if (row.trigger?.reversalRisk) push('action-TF rejection wick risk');
   if (row.trigger?.postPeakTrap) push('post-peak late-entry trap');
   if (row.trigger?.overextended) push('entry overextended / chase risk');
+  // v21.38.0 [MTF ↔ DEEP COMBINED VERDICT]: the super-intelligence gate.
+  // The board already fuses MTF + the 29-model deep ensemble into
+  // `finalVerdict`; an explicit HOLD (deep SVA/council veto) or STAND_ASIDE
+  // (engine conflict) must block every manual entry, not just stamp a badge.
+  const fvDecision = String(row.finalVerdict?.decision || '').toUpperCase();
+  if (fvDecision === 'HOLD') {
+    push(`MTF↔DEEP combined verdict HOLD — ${row.finalVerdict?.reason || 'deep lane veto'}`);
+  }
+  if (fvDecision === 'STAND_ASIDE') {
+    push(`MTF↔DEEP combined verdict STAND_ASIDE — ${row.finalVerdict?.reason || 'engine conflict'}`);
+  }
+  const fvDeepSide = row.finalVerdict?.deep?.side === 'LONG' || row.finalVerdict?.deep?.side === 'SHORT'
+    ? row.finalVerdict.deep.side : null;
+  if (fvDeepSide && side && fvDeepSide !== side) {
+    push(`deep ensemble ${fvDeepSide} vs MTF ${side} — opposite lane`);
+  }
   if (Number.isFinite(score) && score < minScore) push(`score ${score} < pro floor ${minScore}`);
   if (row.autoEligible !== true) {
     if (Array.isArray(row.autoBlockers) && row.autoBlockers.length) {
@@ -2159,6 +2177,18 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
       if (kept.length) reasons.push(...kept);
     }
     if (openSymbols.has(String(row?.symbol || '').toUpperCase())) reasons.push('already open');
+    // v21.38.0: HOLD / STAND_ASIDE are not decorations — the combined
+    // MTF+deep verdict blocks the auto lane exactly like it blocks manual.
+    const fvDecision = String(row?.finalVerdict?.decision || '').toUpperCase();
+    if (fvDecision === 'HOLD' || fvDecision === 'STAND_ASIDE') {
+      reasons.push(`MTF↔DEEP combined verdict ${fvDecision}`);
+    }
+    const fvDeepSide = row?.finalVerdict?.deep?.side;
+    if ((fvDeepSide === 'LONG' || fvDeepSide === 'SHORT')
+      && (row?.side === 'LONG' || row?.side === 'SHORT')
+      && fvDeepSide !== row.side) {
+      reasons.push(`deep ensemble ${fvDeepSide} vs MTF ${row.side}`);
+    }
     const last = lastEntryAt[String(row?.symbol || '').toUpperCase()] || 0;
     if (last && now - last < cooldownMs) reasons.push(`cooldown (${Math.ceil((cooldownMs - (now - last)) / 60_000)}m left)`);
     if (reasons.length) out.push({ ...row, autoPickBlockers: [...new Set(reasons)] });

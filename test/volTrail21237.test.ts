@@ -533,7 +533,15 @@ describe('v21.23.7 S9b — mtfAutoTick entry stamps vol class + t1ClosePct', () 
   }
 
   it('HIGH-vol (ATR 2.2%) ELITE row → openPaperTrade me t1ClosePct 0.40 + atrPct stamp', async () => {
-    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
+    __resetMtfAutoForTests({
+      config: {
+        enabled: true, executionMode: 'paper', minScore: 75,
+        // v21.38.0: this fixture pins the HIGH-vol SIZING stamp (ATR 2.2%).
+        // Paper parity would apply the live noise-stop floor (1% SL = 0.45×
+        // ATR) and block entry, which is a different contract under test.
+        paperLiveParity: false,
+      },
+    });
     const { paper, calls } = fakePaper();
     const out = await mtfAutoTick(tickP(paper));
     expect(out.opened).toHaveLength(1);

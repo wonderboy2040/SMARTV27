@@ -282,6 +282,8 @@ describe('v21.18.0 — Dual-TF Superintelligence Board + FreeLLMAPI + Wallet 10x
           rows: [{
             ok: true, symbol: 'BTCUSDT', market: 'CRYPTO', mode: 'INTRADAY', label: '15m + 5m', holdMin: 45,
             side: 'LONG', dir: 1, superScore: 86, tier: 'ELITE', autoEligible: true, autoBlockers: [],
+            // v21.38.0: paperLiveParity (default ON) runs the live direction gate.
+            directionVerified: true, directionVerdict: 'VERIFIED',
             tfFit: 'GOOD', dualAligned: true, triggerFired: true, counterTrend: false, grade: 'A', costR: 0.1,
             plan: { entry: 1000, stopLoss: 990, t1: 1020, t2: 1040 },
           }],

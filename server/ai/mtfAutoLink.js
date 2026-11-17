@@ -98,6 +98,9 @@ import {
 // v21.29.0 [R11 VALIDATION HARNESS] — shadow evidence + acceptance gates.
 import { recordShadowDecision, shadowHarnessView } from './shadowHarness.js';
 import { evaluateEntryTiming } from './mtfEntryTiming.js';
+// v21.38.0 [PRE-ENTRY RECHECK] — pure, cycle-free gate shared by the auto
+// lane and both manual routes. Real ATR + risk-ratio + deep-verdict aware.
+import { preEntryRecheck } from './preEntryGate.js';
 // v21.35.4 [PRE-TRADE HIGHER-PROFIT GATES] — deterministic entry-quality gates:
 // Monte-Carlo odds ("time machine" on the symbol's own closed bars) +
 // wick-immune last-closed-bar breakout confirmation.
@@ -279,6 +282,25 @@ export const MTF_AUTO_DEFAULTS = {
   // `enforce` (default) blocks clear late/reversal/direction-disagreement
   // entries; `shadow` records only; `off` disables. Env: ENTRY_TIMING_GUARD.
   entryTimingGuard: 'enforce',
+  // v21.38.0 [PRE-ENTRY RECHECK] — the measured paper/live failure mode:
+  // 13 of 30 losing MTF paper trades never worked (MFE < 0.1R) and were
+  // entered after the move had already reversed. This pure gate (same module
+  // for auto + manual paper + manual live) blocks:
+  //   STALE · INVALIDATED · TARGET_DONE · REVERSAL (>=20% risk adverse) ·
+  //   WEAKENING (>=0.75 ATR adverse) · STRUCTURE_BREAK · LATE_CHASE (>25%
+  //   of risk past entry) · deep-ensemble conflict/HOLD/STAND_ASIDE ·
+  //   direction not PAKKA (when required) · trap/zone/reversal veto flags.
+  // Missing data FAILS OPEN. `shadow` records would-blocks; env:
+  // PRE_ENTRY_RECHECK.
+  preEntryRecheck: 'enforce',
+  preEntryMaxChaseRiskRatio: 0.25,
+  preEntryMaxAdverseRiskRatio: 0.20,
+  preEntryMaxRowAgeMs: 120_000,
+  // v21.38.0 [PAPER/LIVE PARITY] — the paper lane used to bypass the live
+  // fidelity / loss-churn / entry-quality gates (BNB paper opened seconds
+  // after the live lane blocked the same setup). Default ON: paper now runs
+  // the SAME pre-entry gates. `false` restores the legacy paper lane.
+  paperLiveParity: true,
   // v21.28.0 F2: LIVE TP1 partial parity with the paper engine. Default OFF
   // until CoinDCX reduce-only/partial behavior is verified on a small position.
   liveTp1Partial: false,
@@ -631,6 +653,12 @@ function _sanitizeCfg(cfg) {
   out.liveTp1Partial = cfg.liveTp1Partial === true;
   // v21.30.0: timing guard default enforce (this is the late-reversal fix).
   out.entryTimingGuard = normalizeGuardMode(cfg.entryTimingGuard, 'enforce');
+  // v21.38.0 [PRE-ENTRY RECHECK + PARITY]
+  out.preEntryRecheck = normalizeGuardMode(cfg.preEntryRecheck, 'enforce');
+  out.preEntryMaxChaseRiskRatio = clampN(cfg.preEntryMaxChaseRiskRatio, 0.05, 0.75, 0.25);
+  out.preEntryMaxAdverseRiskRatio = clampN(cfg.preEntryMaxAdverseRiskRatio, 0.05, 0.75, 0.20);
+  out.preEntryMaxRowAgeMs = clampN(cfg.preEntryMaxRowAgeMs, 15_000, 900_000, 120_000);
+  out.paperLiveParity = cfg.paperLiveParity !== false;
   // v21.29.0 [R3–R9] mode allowlist. Unknown/legacy values never silently
   // become enforce — each falls back to its documented default.
   out.reversalGuardV2 = normalizeGuardMode(cfg.reversalGuardV2, 'shadow');
@@ -982,11 +1010,15 @@ export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
       // v21.37.0 — evidence-driven pre-entry fidelity + loss-churn locks.
       signalFidelity: signalFidelityMode(),
       lossChurnLock: lossChurnLockMode(),
+      // v21.38.0 — fresh-quote thesis revalidation + paper/live parity.
+      preEntryRecheck: preEntryRecheckMode(),
     },
     scopes: {
-      signalFidelity: String(cfg?.signalFidelityScope || 'live').toLowerCase() === 'all' ? 'all' : 'live',
-      lossChurnLock: String(cfg?.lossChurnScope || 'live').toLowerCase() === 'all' ? 'all' : 'live',
+      signalFidelity: String(cfg?.signalFidelityScope || 'live').toLowerCase() === 'all' || cfg?.paperLiveParity === true ? 'all' : 'live',
+      lossChurnLock: String(cfg?.lossChurnScope || 'live').toLowerCase() === 'all' || cfg?.paperLiveParity === true ? 'all' : 'live',
+      preEntryRecheck: 'all',
     },
+    paperLiveParity: cfg?.paperLiveParity === true,
     thresholds: {
       clusterGuardMax: Number(cfg?.clusterGuardMax) || 2,
       calibrationMinN: Number(cfg?.calibrationMinN) || 30,
@@ -1014,6 +1046,10 @@ export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
       lossChurnWindowMin: Number.isFinite(Number(cfg?.lossChurnWindowMin)) ? Number(cfg.lossChurnWindowMin) : 120,
       lossChurnStreak: Number.isFinite(Number(cfg?.lossChurnStreak)) ? Number(cfg.lossChurnStreak) : 2,
       lossChurnStreakLockMin: Number.isFinite(Number(cfg?.lossChurnStreakLockMin)) ? Number(cfg.lossChurnStreakLockMin) : 60,
+      // v21.38.0 — pre-entry recheck knobs (pure gate in preEntryGate.js).
+      preEntryMaxChaseRiskRatio: Number(cfg?.preEntryMaxChaseRiskRatio) > 0 ? Number(cfg.preEntryMaxChaseRiskRatio) : 0.25,
+      preEntryMaxAdverseRiskRatio: Number(cfg?.preEntryMaxAdverseRiskRatio) > 0 ? Number(cfg.preEntryMaxAdverseRiskRatio) : 0.20,
+      preEntryMaxRowAgeMs: Number(cfg?.preEntryMaxRowAgeMs) > 0 ? Number(cfg.preEntryMaxRowAgeMs) : 120_000,
     },
     calibration,
     shadowHarness: harness,
@@ -1269,6 +1305,9 @@ export function lateWaveGateMode() { return _guardMode('lateWaveGate', 'LATE_WAV
 // to paper). Both default to enforce + `live` scope.
 export function signalFidelityMode() { return _guardMode('signalFidelity', 'SIGNAL_FIDELITY', 'enforce'); }
 export function lossChurnLockMode() { return _guardMode('lossChurnLock', 'LOSS_CHURN_LOCK', 'enforce'); }
+// v21.38.0 — pure pre-entry recheck (stale / invalidated / chase / reversal /
+// structure break / deep conflict). Same gate for auto + manual paper + live.
+export function preEntryRecheckMode() { return _guardMode('preEntryRecheck', 'PRE_ENTRY_RECHECK', 'enforce'); }
 
 /** True when a scoped gate applies to this tick. `live` never touches paper. */
 export function gateScopeApplies(scope, liveActive) {
@@ -4638,6 +4677,58 @@ export async function mtfAutoTick(p = {}) {
         continue;
       }
 
+      // ---------- v21.38.0 [PRE-ENTRY RECHECK] ----------
+      // The single pure gate shared with both manual routes (preEntryGate.js).
+      // Measured failure mode: 13 of 30 losing MTF paper trades never worked
+      // (MFE < 0.1R) — they were opened after the entry-timeframe move had
+      // already stalled/reversed. This re-validates the thesis against the
+      // freshest quote BEFORE sizing: stale row, SL already through, target
+      // already touched, late chase, reversal, structure break, ≥0.75 ATR
+      // adverse, MTF↔DEEP HOLD/STAND_ASIDE/conflict, direction unverified.
+      // Missing data fails OPEN; `shadow` records would-blocks only.
+      const preMode = preEntryRecheckMode();
+      const parity = cfg.paperLiveParity === true;
+      if (preMode !== 'off') {
+        const preQuote = timingQuote != null ? timingQuote : (Number(row.ltp) > 0 ? Number(row.ltp) : null);
+        const pre = preEntryRecheck({
+          row,
+          side: row.side,
+          livePrice: preQuote,
+          now,
+          requireVerified: wantLiveOrder || parity,
+          requireDeepAligned: true,
+          thresholds: {
+            maxChaseRiskRatio: Number(cfg.preEntryMaxChaseRiskRatio) || 0.25,
+            maxAdverseRiskRatio: Number(cfg.preEntryMaxAdverseRiskRatio) || 0.20,
+            maxRowAgeMs: Number(cfg.preEntryMaxRowAgeMs) || 120_000,
+          },
+        });
+        recordShadowDecision(guardState.shadowStats, {
+          filter: 'preEntryRecheck', mode: preMode, wouldBlock: pre.ok !== true,
+          reason: pre.blockers.join(' | ') || pre.warnings[0] || `state ${pre.state}`,
+          symbol: sym, market: guardDesk, at: now,
+        });
+        if (pre.ok !== true) {
+          const why = pre.blockers.join(' | ');
+          if (preMode === 'shadow') {
+            out.shadow.push({
+              symbol: sym, market: guardDesk,
+              warnings: [{ filter: 'preEntryRecheck', mode: preMode, wouldBlock: true, reason: why }],
+            });
+            _logEvent('pre-entry-shadow', `${sym}: would-block — ${why}`);
+          } else {
+            out.skipped.push(`${sym}: pre-entry recheck blocked — ${why}`);
+            _logEvent('pre-entry-block', `${sym}: ${why} (${pre.state} · ltp ${pre.metrics.livePrice ?? '—'} · entry ${entry} · SL ${sl} · ATR ${pre.metrics.atr ?? '—'} · chase ${pre.metrics.chaseRatio ?? '—'} · adverse ${pre.metrics.adverseRatio ?? '—'})`);
+            continue;
+          }
+        } else if (pre.warnings.length > 0) {
+          out.shadow.push({
+            symbol: sym, market: guardDesk,
+            warnings: pre.warnings.map(reason => ({ filter: 'preEntryRecheck', mode: preMode, wouldBlock: false, reason })),
+          });
+        }
+      }
+
       // ---------- v21.37.0 [SIGNAL FIDELITY + LOSS-CHURN] ----------
       // Two evidence-driven pre-entry gates (see signalFidelity.js):
       //   • signalFidelity — hard vetoes (CHOP/TRANSITION, familyFit block,
@@ -4646,11 +4737,13 @@ export async function mtfAutoTick(p = {}) {
       //     HTF agreement). Missing evidence fails open.
       //   • lossChurnLock — a recent non-profit close locks the same side;
       //     two non-profit closes lock both sides. Profitable closes never lock.
-      // Scope defaults to `live`; the paper lane stays byte-identical.
+      // Scope defaults to `live`; v21.38.0 `paperLiveParity` (default ON)
+      // extends BOTH gates to the paper lane — paper must never open a setup
+      // the live lane is blocking (the BNB parity gap).
       const fidMode = signalFidelityMode();
       const churnMode = lossChurnLockMode();
-      const fidApplies = gateScopeApplies(cfg.signalFidelityScope, wantLiveOrder);
-      const churnApplies = gateScopeApplies(cfg.lossChurnScope, wantLiveOrder);
+      const fidApplies = parity || gateScopeApplies(cfg.signalFidelityScope, wantLiveOrder);
+      const churnApplies = parity || gateScopeApplies(cfg.lossChurnScope, wantLiveOrder);
       if (fidMode !== 'off' && fidApplies) {
         const fidCtx = fidelityContextFor(row);
         const fid = evaluateSignalFidelity({
@@ -4720,12 +4813,16 @@ export async function mtfAutoTick(p = {}) {
       // fade gates. Real money ke liye board ka PAKKA direction chahiye
       // (undefined/false dono unverified hain), stop entry-time ATR ke noise
       // band se bahar hona chahiye, aur FADING momentum par nayi entry nahi.
-      // Paper rows in gates se affect nahi hote.
-      if (wantLiveOrder) {
+      // v21.38.0: `paperLiveParity` (default ON) applies the SAME gates to
+      // paper — a paper ticket may never be cleaner than the live ticket for
+      // the identical board row. `paperLiveParity:false` restores the old
+      // paper-exempt lane.
+      if (wantLiveOrder || parity) {
+        const laneLbl = wantLiveOrder ? 'LIVE' : 'PAPER (live-parity)';
         if (row.directionVerified !== true) {
           const verdict = row.directionVerdict || `WAIT-${String(row.side || '').toUpperCase()}`;
-          out.skipped.push(`${sym}: LIVE blocked — direction not PAKKA verified (${verdict})`);
-          _logEvent('live-direction-block', `${sym}: LIVE blocked — direction not PAKKA verified (${verdict})`);
+          out.skipped.push(`${sym}: ${laneLbl} blocked — direction not PAKKA verified (${verdict})`);
+          _logEvent(wantLiveOrder ? 'live-direction-block' : 'paper-direction-block', `${sym}: ${laneLbl} blocked — direction not PAKKA verified (${verdict})`);
           continue;
         }
         const liveQuality = evaluateLiveEntryQuality(row, {
@@ -4733,8 +4830,8 @@ export async function mtfAutoTick(p = {}) {
         });
         if (liveQuality.blocked) {
           const why = liveQuality.reasons.join(' | ');
-          out.skipped.push(`${sym}: LIVE entry veto — ${why}`);
-          _logEvent('live-entry-veto', `${sym}: ${why} (sl ${liveQuality.slDistPct ?? '—'}% · ATR ${liveQuality.atrPct ?? '—'}% · momentum ${liveQuality.momentumState})`);
+          out.skipped.push(`${sym}: ${laneLbl} entry veto — ${why}`);
+          _logEvent(wantLiveOrder ? 'live-entry-veto' : 'paper-entry-veto', `${sym}: ${laneLbl} ${why} (sl ${liveQuality.slDistPct ?? '—'}% · ATR ${liveQuality.atrPct ?? '—'}% · momentum ${liveQuality.momentumState})`);
           continue;
         }
       }

@@ -785,6 +785,10 @@ describe('v21.29.0 R4-R9 — tick integration', () => {
     __resetMtfAutoForTests({
       config: {
         enabled: true, desks: { india: false, crypto: true },
+        // v21.38.0: this test pins SHADOW-guard telemetry (CHOP must open in
+        // shadow). The new default paperLiveParity would enforce the live CHOP
+        // fidelity veto on the paper lane, so opt out explicitly here.
+        paperLiveParity: false,
         eventSessionFilter: 'shadow', regimeFilter: 'shadow', perpVeto: 'shadow',
         clusterGuard: 'shadow', scoreCalibration: 'off',
       },

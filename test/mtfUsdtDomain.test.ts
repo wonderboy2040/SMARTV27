@@ -303,6 +303,8 @@ describe('mtfAutoLink — USDT sizing for crypto rows', () => {
     rows: [{
       ok: true, symbol: 'BTCUSDT', market: 'CRYPTO', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
       superScore: 84, tier: 'STRONG', side: 'LONG', dir: 1, grade: 'A', triggerFired: true,
+      // v21.38.0: paperLiveParity (default ON) runs the live direction gate.
+      directionVerified: true, directionVerdict: 'VERIFIED',
       dualAligned: true, counterTrend: false, tfFit: 'GOOD', autoEligible: true, autoBlockers: [],
       plan: { entry: 82000, stopLoss: 81000, t1: 83000, t2: 84000 }, drivers: [],
     }],

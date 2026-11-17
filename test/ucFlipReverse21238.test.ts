@@ -644,7 +644,16 @@ describe('v21.23.8 S8 — EQUITY SIM rows ab auto-pool me (sirf allowed domains)
   beforeEach(() => { __resetMtfAutoForTests(); __resetDirectionLocksForTests(); });
 
   it('ELITE GLOBALFUTURES row (NVDA) → paper SIM entry market GLOBALFUTURES · ccy USDC · live order KABHI nahi', async () => {
-    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
+    __resetMtfAutoForTests({
+      config: {
+        enabled: true, executionMode: 'paper', minScore: 75,
+        // v21.38.0: EQUITY SIM is a paper-only desk (no CoinDCX listing). The
+        // new paperLiveParity would apply the FUTURES live entry-quality floor
+        // (SL 1% = 0.45× ATR 2.2% < 1.1×) and block this SIM row; this test
+        // pins the SIM lane's own contract, so it opts out of parity.
+        paperLiveParity: false,
+      },
+    });
     const { paper, calls } = fakePaper([]);
     const nvdaRow = {
       ok: true, symbol: 'NVDA', market: 'GLOBALFUTURES', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
