@@ -1557,7 +1557,7 @@ export function buildEarlyRadar(rows, limit = 3) {
     }));
 }
 
-export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', holdMin = null, boardSigs = [], minScore = 75, limit = TOP_DEEP_TREND_LIMIT, fx = null, fresh = false, force = false, candlesFor = null, deepFor = null } = {}) {
+export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', holdMin = null, boardSigs = [], minScore = 75, entryFloor = null, limit = TOP_DEEP_TREND_LIMIT, fx = null, fresh = false, force = false, candlesFor = null, deepFor = null } = {}) {
   ensureMtfLedgerHydrated();
   const rawMkt = String(market || 'INDIA').toUpperCase();
   const mkt = rawMkt === 'EQUITY_SIM' ? 'GLOBALFUTURES' : rawMkt;
@@ -1569,7 +1569,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
   const isGlobalEqDesk = mkt === 'GLOBALFUTURES';
   const fxTag = (isUsdtPerpDesk || isGlobalEqDesk) && Number(fx) > 40 && Number(fx) < 150 ? Math.round(Number(fx) * 10) / 10 : 'd';
   const sigFp = (boardSigs || []).slice(0, 6).map(s => `${s?.symbol || ''}:${s?.side || ''}`).join(',');
-  const key = `${mkt}:${modeId}:${hold}:${minScore}:${maxRows}:${boardSigs.length}:${sigFp}:${fxTag}`;
+  const key = `${mkt}:${modeId}:${hold}:${minScore}:${entryFloor ?? ''}:${maxRows}:${boardSigs.length}:${sigFp}:${fxTag}`;
   const now = Date.now();
   const hit = _boardCache.get(key);
   if (hit && !fresh && !force && typeof candlesFor !== 'function' && now - hit.at < BOARD_TTL_MS) return { ...hit.payload, cached: true };
@@ -1747,6 +1747,18 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
         r.autoEligible = false;
       }
     }
+  }
+
+  // v21.40.0 [ENTRY-READINESS HONESTY]: `autoEligible` answers the ACTION
+  // floor (65) quality question; the operator's real question is whether the
+  // CONFIGURED floor (default 75) + every blocker would allow a trade. Stamp
+  // an additive, deduped readiness view on each visible row. Execution still
+  // uses mtfProEntryGate — this only stops 65–74 rows from looking "ready".
+  const entryFloorN = Number(entryFloor) > 0
+    ? Number(entryFloor)
+    : (Number(minScore) > 0 ? Number(minScore) : 75);
+  for (const r of [...trimmed, ...metalsRows, ...equitySimRows]) {
+    if (r && typeof r === 'object') r.entryReadiness = computeEntryReadiness(r, entryFloorN);
   }
 
   // v21.25.1 [NEVER-EMPTY MARKET SCAN]: WATCH+ filter ke baad board khaali
@@ -1963,6 +1975,9 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
     counts: {
       rows: trimmed.length, overBar: q75.length,
       eligible: trimmed.filter(r => r.autoEligible).length,
+      // v21.40.0: configured-floor readiness (default 75) — the number the
+      // entry path actually uses. `eligible` stays the ACTION-floor (65) view.
+      entryReady: trimmed.filter(r => r.entryReadiness?.eligible === true).length,
       strong: trimmed.filter(r => r.tier === 'STRONG' || r.tier === 'ELITE').length,
       fired: trimmed.filter(r => r.triggerFired).length,
       earlyRadar: earlyRadar.length,
@@ -2019,6 +2034,88 @@ export function peekDualMtfBoards(maxAgeMs = 90_000) {
 // ------------------------------------------------------------
 // 4) AUTO-LINK SIFT — pure; execution mtfAutoLink.js karta hai
 // ------------------------------------------------------------
+/**
+ * v21.40.0 [ONE BLOCKER, ONE VOICE]: the same row state is re-checked by
+ * explicit gate clauses and by the row's `autoBlockers[]`. Both are correct,
+ * but returning both produced 409s where direction/score/main-signal appeared
+ * two or three times. Collapse only SEMANTIC duplicates — every distinct
+ * veto still reaches the caller. Pass/fail is unchanged.
+ */
+function _blockerGroup(msg) {
+  const s = String(msg || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  if (/^direction not pa[kc]{2}a verified/.test(s)) return 'direction';
+  if (/^trigger fire pending/.test(s)) return 'trigger';
+  if (/^score \d+ < /.test(s)) return 'score';
+  if (/^main ai-board grade .*(actionable nahi|aligned signal chahiye|action\+)/.test(s)) return 'main-grade';
+  if (/^main ai-board confidence \d+ < 60/.test(s)) return 'main-conf';
+  if (/^main ai-board signal sirf .*old/.test(s)) return 'main-age';
+  if (/^entry overextended/.test(s)) return 'overextended';
+  if (/^1d\+4h htf bias .* against /.test(s)) return 'htf';
+  if (/^counter-trend setup$/.test(s)) return 'counter-trend';
+  if (/^main ai-board ensemble .* vs mtf /.test(s)) return 'board-conflict';
+  if (/^board ensemble side .* mtf side /.test(s)) return 'board-conflict';
+  if (/^sva verifier (says )?flip/.test(s)) return 'sva-conflict';
+  if (/^ai council (hard-no|.*hard disagree)/.test(s)) return 'council-conflict';
+  if (/^incomplete (entry\/sl\/t1 ticket|ticket)/.test(s)) return 'ticket';
+  if (/^no clean (long\/short )?side/.test(s)) return 'no-side';
+  return null;
+}
+
+export function dedupeEntryBlockers(blockers) {
+  const seen = new Set();
+  const out = [];
+  for (const b of (Array.isArray(blockers) ? blockers : [])) {
+    if (!b) continue;
+    const group = _blockerGroup(b);
+    if (group) {
+      if (seen.has(group)) continue;
+      seen.add(group);
+    }
+    if (!out.includes(b)) out.push(b);
+  }
+  return out;
+}
+
+function _blockerStage(msg) {
+  const s = String(msg || '').toLowerCase();
+  if (!s) return null;
+  if (/main ai-board|ensemble signal|board ensemble|sva verifier|ai council/.test(s)) return 'main-signal';
+  if (/direction|no clean side|direction certificate/.test(s)) return 'direction';
+  if (/trigger fire pending/.test(s)) return 'trigger';
+  if (/score \d+ <|plan grade|winprob|cost \d|net rr|micro/.test(s)) return 'quality';
+  if (/trap|zone wall|reversal|exhausted|opposing|late-entry|overextended|chase|wick/.test(s)) return 'risk';
+  if (/tf-fit|counter-trend|htf bias|misaligned/.test(s)) return 'structure';
+  if (/stale|row .* old|structure break|invalidated|target already/.test(s)) return 'timing';
+  return 'other';
+}
+
+/**
+ * Pure execution-readiness view for the board/API. `autoEligible` answers the
+ * ACTION-floor quality question (65+); this answers the operator's real
+ * question: "would the configured entry floor + every blocker allow a trade?"
+ * Additive only — execution still uses mtfProEntryGate.
+ */
+export function computeEntryReadiness(row = {}, floor = 75) {
+  const f = Number(floor) > 0 ? Number(floor) : 75;
+  const score = Number(row?.superScore);
+  // The entry floor is authoritative for this view; replace the row's
+  // ACTION-floor score blocker (65) with the configured floor (e.g. 75).
+  const blockers = (Array.isArray(row?.autoBlockers) ? row.autoBlockers : [])
+    .filter(b => !/^score \d+ < /.test(String(b)));
+  if (Number.isFinite(score) && score < f) blockers.push(`score ${score} < entry floor ${f}`);
+  const unique = dedupeEntryBlockers(blockers);
+  return {
+    floor: f,
+    eligible: row?.autoEligible === true
+      && Number.isFinite(score) && score >= f
+      && unique.length === 0,
+    blockers: unique,
+    primary: unique[0] || null,
+    stage: _blockerStage(unique[0]),
+  };
+}
+
 export function mtfProEntryGate(row, {
   mainSignal = null,
   minScore = Number(SUPER_TIERS.ACTION) || 65,
@@ -2117,14 +2214,19 @@ export function mtfProEntryGate(row, {
     push('main AI-BOARD ensemble signal missing — entry blocked');
   }
 
+  // v21.40.0 [ONE BLOCKER, ONE VOICE]: autoBlockers already carry the same
+  // score/direction/trigger/grade state that the explicit clauses above just
+  // re-checked. Collapse only semantic duplicates so the 409 reads once per
+  // reason; every distinct veto still ships and pass/fail is unchanged.
+  const uniqueBlockers = dedupeEntryBlockers(blockers);
   return {
-    ok: blockers.length === 0,
+    ok: uniqueBlockers.length === 0,
     side,
     score: Number.isFinite(score) ? score : null,
     mainSignalSide: mainSide,
     mainSignalGrade: mainSignal?.grade ?? null,
     mainSignalConfidence: Number.isFinite(Number(mainSignal?.confidence)) ? Number(mainSignal.confidence) : null,
-    blockers,
+    blockers: uniqueBlockers,
   };
 }
 
@@ -2158,7 +2260,13 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
     const reasons = [];
     if (!row?.ok) reasons.push('plan unavailable');
     if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '—'} < ${minScore}`);
-    if (!tradeAll && row?.ensembleSignalAvailable === false) reasons.push('main AI-BOARD ensemble signal unavailable');
+    // v21.40.0: when the row already carries the richer main-AI-BOARD reason
+    // (grade/confidence/side), don't repeat it as a generic "unavailable".
+    const hasMainBoardBlocker = Array.isArray(row?.autoBlockers)
+      && row.autoBlockers.some(b => /main AI-BOARD/i.test(String(b)));
+    if (!tradeAll && row?.ensembleSignalAvailable === false && !hasMainBoardBlocker) {
+      reasons.push('main AI-BOARD ensemble signal unavailable');
+    }
     if (cfg.closedBarConfirm === true && row?.closedBarConfirm !== true) {
       const why = Array.isArray(row?.signalStability?.reasons) ? row.signalStability.reasons[0] : null;
       reasons.push(`closed-bar confirm pending${why ? ` — ${why}` : ''}`);
@@ -2191,7 +2299,8 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
     }
     const last = lastEntryAt[String(row?.symbol || '').toUpperCase()] || 0;
     if (last && now - last < cooldownMs) reasons.push(`cooldown (${Math.ceil((cooldownMs - (now - last)) / 60_000)}m left)`);
-    if (reasons.length) out.push({ ...row, autoPickBlockers: [...new Set(reasons)] });
+    const uniqueReasons = dedupeEntryBlockers([...new Set(reasons)]);
+    if (uniqueReasons.length) out.push({ ...row, autoPickBlockers: uniqueReasons });
     else out.push({ ...row, autoPickBlockers: [] });
   }
   // Eligible picks first, best score first

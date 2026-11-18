@@ -447,7 +447,7 @@ describe('v21.38.0 — wiring pins', () => {
   const routesSrc = fs.readFileSync(path.join(root, 'server/ai/routes.js'), 'utf8');
 
   it('auto tick runs the pre-entry gate BEFORE the fidelity/churn block', () => {
-    expect(autoSrc).toContain("import { preEntryRecheck } from './preEntryGate.js';");
+    expect(autoSrc).toContain("import { preEntryRecheck, measuredRowAtr } from './preEntryGate.js';");
     expect(autoSrc).toContain('const pre = preEntryRecheck({');
     expect(autoSrc).toContain('pre-entry recheck blocked');
     expect(autoSrc).toContain('preEntryRecheck: \'enforce\'');

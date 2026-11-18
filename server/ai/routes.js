@@ -1041,6 +1041,30 @@ export function registerAITradingRoutes(app, deps) {
     } catch { return null; }
   };
 
+  // v21.40.0 [MANUAL ROW PARITY]: the board builds every row with the live
+  // tick overlay, but the manual PAPER/LIVE buttons rebuilt the row WITHOUT
+  // it. Same symbol could therefore be scored/planned against a stale last
+  // close while the board card showed a fresh tick. Resolve the freshest quote
+  // from the same source the board/auto lane uses; honest null on failure.
+  const mtfLiveLtpFor = async (market, symbol) => {
+    const mkt = String(market || '').toUpperCase();
+    const sym = String(symbol || '').toUpperCase().trim();
+    if (!sym) return null;
+    try {
+      if (mkt === 'GLOBALFUTURES') {
+        const overlay = await mtfGlobalQuoteOverlay();
+        const px = Number(overlay?.[`GLOBALFUTURES|${sym}`]?.price);
+        return px > 0 ? px : null;
+      }
+      if (mkt === 'CRYPTO' || mkt === 'FUTURES' || mkt === 'METALS') {
+        const map = await mtfUsdtQuoteMap();
+        const px = Number(map?.get(normalizeLinkSymbol(sym, mkt)));
+        return px > 0 ? px : null;
+      }
+    } catch { /* honest null — row falls back to its candle close */ }
+    return null;
+  };
+
   // v21.38.0 [PRE-ENTRY RECHECK] — one pure verdict for both manual board
   // buttons. The auto lane already runs this before sizing; a manual click
   // must never be able to place a ticket the engine would reject (stale plan,
@@ -1175,6 +1199,9 @@ export function registerAITradingRoutes(app, deps) {
         mode: String(req.query.mode || cfg.mode || 'INTRADAY').toUpperCase(),
         holdMin: req.query.hold != null ? Number(req.query.hold) : cfg.holdMin,
         minScore: req.query.minScore != null ? Number(req.query.minScore) : cfg.minScore,
+        // v21.40.0: readiness must answer the MANUAL/AUTO entry question, which
+        // uses cfg.minScore — not the UI display slider (query minScore).
+        entryFloor: Math.max(65, Number(cfg.minScore) || 75),
         limit: req.query.limit != null ? Math.min(TOP_DEEP_TREND_LIMIT, Number(req.query.limit)) : TOP_DEEP_TREND_LIMIT,
         boardSigs,
         fx: await mtfLiveFx(),
@@ -1211,7 +1238,8 @@ export function registerAITradingRoutes(app, deps) {
       if (!symbol) return jsonError(res, 400, 'symbol required');
       const fxLive = await mtfLiveFx();
       const mainSignal = await mainSignalForEntry(market, symbol);
-      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive, boardSig: mainSignal }).catch(() => null);
+      const liveLtp = await mtfLiveLtpFor(market, symbol);
+      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive, boardSig: mainSignal, liveLtp }).catch(() => null);
       if (!row || !row.ok) return jsonError(res, 404, `dual-board row not found for ${symbol} (abhi scan me nahi hai)`);
       if (!(row.side === 'LONG' || row.side === 'SHORT') || !row.plan?.entry || !row.plan?.stopLoss || !row.plan?.t1) {
         return jsonError(res, 400, `${symbol}: tradeable side/levels nahi hain (bias ${row.bias || 'WAIT'})`);
@@ -1471,7 +1499,8 @@ export function registerAITradingRoutes(app, deps) {
 
       const fxLive = await mtfLiveFx();
       const mainSignal = await mainSignalForEntry(market, symbol);
-      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive, boardSig: mainSignal }).catch(() => null);
+      const liveLtp = await mtfLiveLtpFor(market, symbol);
+      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive, boardSig: mainSignal, liveLtp }).catch(() => null);
       if (!row || !row.ok) {
         return jsonError(res, 404, `MTF Dual Board row not found for ${symbol}`);
       }

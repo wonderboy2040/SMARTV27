@@ -100,7 +100,7 @@ import { recordShadowDecision, shadowHarnessView } from './shadowHarness.js';
 import { evaluateEntryTiming } from './mtfEntryTiming.js';
 // v21.38.0 [PRE-ENTRY RECHECK] — pure, cycle-free gate shared by the auto
 // lane and both manual routes. Real ATR + risk-ratio + deep-verdict aware.
-import { preEntryRecheck } from './preEntryGate.js';
+import { preEntryRecheck, measuredRowAtr } from './preEntryGate.js';
 // v21.35.4 [PRE-TRADE HIGHER-PROFIT GATES] — deterministic entry-quality gates:
 // Monte-Carlo odds ("time machine" on the symbol's own closed bars) +
 // wick-immune last-closed-bar breakout confirmation.
@@ -919,11 +919,18 @@ export function computeEffectiveRiskCaps(cfg = MTF_AUTO_DEFAULTS, walletINR = nu
 export const LIVE_ENTRY_MIN_SL_ATR_MULT = 1.1;
 
 export function evaluateLiveEntryQuality(row, {
-  entry, stopLoss, atrPct, minSlAtrMult = LIVE_ENTRY_MIN_SL_ATR_MULT,
+  entry, stopLoss, atrPct, atr: atrAbs = null, minSlAtrMult = LIVE_ENTRY_MIN_SL_ATR_MULT,
 } = {}) {
   const e = Number(entry);
   const sl = Number(stopLoss);
-  const atr = Number(atrPct) > 0 ? Number(atrPct) : null;
+  // v21.40.0 [ONE ATR]: prefer the measured absolute ATR (the same number
+  // preEntryRecheck uses). The old path only read atrPct, so a row carrying
+  // both `context.atr` and `context.atrPct` could be judged against two
+  // different volatility reads in the same entry attempt.
+  const measuredAbs = Number(atrAbs) > 0 ? Number(atrAbs) : null;
+  const atr = measuredAbs != null && e > 0
+    ? measuredAbs / e * 100
+    : (Number(atrPct) > 0 ? Number(atrPct) : null);
   const slDistPct = e > 0 && sl > 0 ? Math.abs(e - sl) / e * 100 : null;
   const slAtrMult = slDistPct != null && atr != null && atr > 0
     ? slDistPct / atr
@@ -1047,7 +1054,12 @@ export function evaluateManualEntryGates({
   // 2) Entry quality — stop must clear the entry-time noise band and the
   //    trigger momentum must not already be FADING against the trade.
   if (isLiveLane || parity) {
-    const q = evaluateLiveEntryQuality(row, { entry, stopLoss, atrPct });
+    const q = evaluateLiveEntryQuality(row, {
+      entry,
+      stopLoss,
+      atrPct,
+      atr: measuredRowAtr({ ...row, entry, stopLoss }),
+    });
     telemetry.entryQuality = q;
     if (q.blocked) blockers.push(`entry quality: ${q.reasons.join(' | ')}`);
   }
@@ -5000,7 +5012,10 @@ export async function mtfAutoTick(p = {}) {
           continue;
         }
         const liveQuality = evaluateLiveEntryQuality(row, {
-          entry, stopLoss: sl, atrPct: entryAtrPct,
+          entry,
+          stopLoss: sl,
+          atrPct: entryAtrPct,
+          atr: measuredRowAtr({ ...row, entry, stopLoss: sl }),
         });
         if (liveQuality.blocked) {
           const why = liveQuality.reasons.join(' | ');

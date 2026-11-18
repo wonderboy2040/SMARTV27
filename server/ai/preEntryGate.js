@@ -59,6 +59,23 @@ const _STATE_RANK = {
 };
 
 /**
+ * The MEASURED ATR only — absolute ATR first, then a real ATR% converted to
+ * price. Never synthesises a value from the stop distance or a 1.2% default.
+ * The stop-floor gate must share this exact number with preEntryRecheck so
+ * the same ticket is never judged against two different volatility reads.
+ */
+export function measuredRowAtr(row = {}) {
+  const entry = _num(row?.entry ?? row?.plan?.entry);
+  const explicit = _num(row?.atr) ?? _num(row?.plan?.atrUsed) ?? _num(row?.context?.atr);
+  if (explicit != null && explicit > 0) return explicit;
+  const atrPct = _num(row?.atrPct) ?? _num(row?.context?.atrPct);
+  if (entry != null && entry > 0 && atrPct != null && atrPct > 0) {
+    return +(entry * atrPct / 100).toFixed(8);
+  }
+  return null;
+}
+
+/**
  * Resolve the REAL ATR for a row instead of the old unconditional
  * `entry × 1.2%` fallback.
  *
@@ -73,13 +90,9 @@ const _STATE_RANK = {
  * @returns {number|null} absolute ATR in price units
  */
 export function resolveRowAtr(row = {}) {
+  const measured = measuredRowAtr(row);
+  if (measured != null) return measured;
   const entry = _num(row?.entry ?? row?.plan?.entry);
-  const explicit = _num(row?.atr) ?? _num(row?.plan?.atrUsed) ?? _num(row?.context?.atr);
-  if (explicit != null && explicit > 0) return explicit;
-  const atrPct = _num(row?.atrPct) ?? _num(row?.context?.atrPct);
-  if (entry != null && entry > 0 && atrPct != null && atrPct > 0) {
-    return +(entry * atrPct / 100).toFixed(8);
-  }
   const sl = _num(row?.stopLoss ?? row?.plan?.stopLoss);
   if (entry != null && entry > 0 && sl != null && sl > 0) {
     const risk = Math.abs(entry - sl);
