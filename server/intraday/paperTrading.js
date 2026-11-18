@@ -388,16 +388,75 @@ export function openPaperTrade(input) {
       : 0.5,
     // v21.23.7: entry-time ATR% (vol-class resolve fallback ke liye stamp)
     atrPct: Number.isFinite(Number(input?.atrPct)) && Number(input.atrPct) > 0 ? Number(input.atrPct) : null,
-    sourceMeta: (input?.sourceMeta && typeof input.sourceMeta === 'object') ? {
-      score: Number(input.sourceMeta.score) || null,
-      tier: String(input.sourceMeta.tier || '').slice(0, 10) || null,
-      mode: String(input.sourceMeta.mode || '').slice(0, 12) || null,
-      holdMin: Number(input.sourceMeta.holdMin) || null,
-      superSymbol: String(input.sourceMeta.superSymbol || '').slice(0, 20) || null,
-      leverage: Number(input.sourceMeta.leverage) || null,
-      walletINR: Number(input.sourceMeta.walletINR) || null,
-      feeBreakevenPrice: Number(input.sourceMeta.feeBreakevenPrice) || null,
-    } : null,
+    sourceMeta: (input?.sourceMeta && typeof input.sourceMeta === 'object') ? (() => {
+      // v21.39.0 [ENTRY AUDIT COMPLETENESS]: the old whitelist kept only
+      // score/tier/mode/holdMin/leverage/wallet, so every ticket lost the
+      // evidence that justified (or should have vetoed) it — direction
+      // certificate, entry gate, fidelity/churn telemetry. Persist a bounded,
+      // primitive-only shape: no unbounded nested payloads, no client secrets.
+      const src = input.sourceMeta;
+      const str = (v, n = 40) => (v == null || v === '' ? null : String(v).slice(0, n));
+      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+      const tri = (v) => (v === true ? true : v === false ? false : null);
+      const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+      const eq = obj(src.entryQuality);
+      const fid = obj(src.fidelity);
+      const churn = obj(src.lossChurn);
+      const pause = obj(src.lossPause);
+      const cert = obj(src.directionCertificate);
+      return {
+        score: Number(src.score) || null,
+        tier: String(src.tier || '').slice(0, 10) || null,
+        mode: String(src.mode || '').slice(0, 12) || null,
+        holdMin: Number(src.holdMin) || null,
+        superSymbol: String(src.superSymbol || '').slice(0, 20) || null,
+        leverage: Number(src.leverage) || null,
+        walletINR: Number(src.walletINR) || null,
+        feeBreakevenPrice: Number(src.feeBreakevenPrice) || null,
+        // v21.39.0 audit fields — the exact reasons a ticket exists.
+        directionVerified: tri(src.directionVerified),
+        triggerFired: tri(src.triggerFired),
+        htfBias: str(src.htfBias, 24),
+        mainSignalSide: str(src.mainSignalSide, 10),
+        mainSignalGrade: str(src.mainSignalGrade, 16),
+        mainSignalConfidence: num(src.mainSignalConfidence),
+        orderSide: str(src.orderSide, 10),
+        directionVerdict: str(src.directionVerdict, 40),
+        entryGate: str(src.entryGate, 24),
+        preEntryState: str(src.preEntryState, 24),
+        directionCertificate: cert ? {
+          version: str(cert.version, 16),
+          side: str(cert.side, 10),
+          orderSide: str(cert.orderSide, 10),
+          verdict: str(cert.verdict, 32),
+          ok: tri(cert.ok),
+          label: str(cert.label, 40),
+        } : null,
+        entryQuality: eq ? {
+          blocked: tri(eq.blocked),
+          slAtrMult: num(eq.slAtrMult),
+          atrPct: num(eq.atrPct),
+          momentumState: str(eq.momentumState, 12),
+        } : null,
+        fidelity: fid ? {
+          mode: str(fid.mode, 10),
+          wouldBlock: tri(fid.wouldBlock),
+          regime: str(fid.regime, 16),
+          rsi: num(fid.rsi),
+          adx: num(fid.adx),
+        } : null,
+        lossChurn: churn ? {
+          mode: str(churn.mode, 10),
+          wouldLock: tri(churn.wouldLock),
+          lossStreak: num(churn.lossStreak),
+        } : null,
+        lossPause: pause ? {
+          streak: num(pause.streak),
+          threshold: num(pause.threshold),
+          blocked: tri(pause.blocked),
+        } : null,
+      };
+    })() : null,
     ...(() => {
       const tList = [t1, t2].filter(x => x != null && x > 0);
       const lad = pRoundLadder({ side: dir, entry: e, stopLoss: sl, targets: tList });

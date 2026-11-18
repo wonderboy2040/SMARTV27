@@ -4,8 +4,8 @@
 // Pins the user's explicit contract: "AI ko sabhi trading 80+
 // signals — Strong or Action — har 15 sec recheck karta rahe."
 //
-//   1. selectWatchlist — STRONG + ACTION only (WATCH/NEUTRAL/FLAT
-//      never enter the watch), per-symbol dedupe with STRONG
+//   1. selectWatchlist - ELITE + STRONG + ACTION only (WATCH/NEUTRAL/FLAT
+//      never enter the watch), per-symbol dedupe by the full grade ladder.
 //      priority, plan/aiScore extraction.
 //   2. recheckRow — the pure price verdict: SL-through INVALIDATED
 //      (long + short), >0.75 ATR adverse drift WEAKENING, T1/T2
@@ -54,6 +54,34 @@ const board = (signals) => ({ signals });
 
 // ---------- pure: watchlist selection ----------
 describe('selectWatchlist — STRONG/ACTION hi watch me aate hain', () => {
+  it('ELITE + STRONG + ACTION rows land; ELITE is the top grade (v21.39.0)', () => {
+    const wl = selectWatchlist([{ market: 'FUTURES', signals: [
+      sig({ symbol: 'SOL', grade: 'ELITE' }),
+      sig({ symbol: 'BTC', grade: 'ACTION' }),
+      sig({ symbol: 'ETH', grade: 'STRONG' }),
+    ] }]);
+    expect(wl.size).toBe(3);
+    expect(wl.get('FUTURES:SOL').grade).toBe('ELITE');
+    expect(wl.get('FUTURES:ETH').grade).toBe('STRONG');
+  });
+
+  it('duplicate symbol: ELITE beats STRONG beats ACTION', () => {
+    const wl = selectWatchlist([{ market: 'FUTURES', signals: [
+      sig({ grade: 'ACTION' }),
+      sig({ grade: 'ELITE' }),
+      sig({ grade: 'STRONG' }),
+    ] }]);
+    expect(wl.size).toBe(1);
+    expect(wl.get('FUTURES:ETH').grade).toBe('ELITE');
+    const down = selectWatchlist([{ market: 'FUTURES', signals: [sig({ grade: 'STRONG' }), sig({ grade: 'ACTION' })] }]);
+    expect(down.get('FUTURES:ETH').grade).toBe('STRONG');
+  });
+
+  it('grade transitions use the full ELITE > STRONG > ACTION ladder', () => {
+    expect(detectTransition({ side: 'LONG', grade: 'STRONG' }, { side: 'LONG', grade: 'ELITE' })).toBe('PROMOTED');
+    expect(detectTransition({ side: 'LONG', grade: 'ELITE' }, { side: 'LONG', grade: 'STRONG' })).toBe('DEMOTED');
+  });
+
   it('WATCH / NEUTRAL / FLAT rows are excluded', () => {
     const wl = selectWatchlist([
       board([sig({ symbol: 'A', grade: 'WATCH' })]),
@@ -366,10 +394,10 @@ describe('buildTickStoreResolver — tick store first, staleness-honest', () => 
 
 // ---------- constants pin ----------
 describe('recheck constants — the user contract', () => {
-  it('realtime WS prices · 30s watchdog · STRONG+ACTION grades', () => {
+  it('realtime WS prices · 30s watchdog · ELITE+STRONG+ACTION grades', () => {
     expect(RECHECK_WATCHDOG_MS).toBe(30_000);
     expect(RECHECK_TICK_MS).toBe(RECHECK_WATCHDOG_MS);
     expect(REALTIME_ROW_MIN_MS).toBe(1_000);
-    expect(RECHECK_GRADES).toEqual(['STRONG', 'ACTION']);
+    expect(RECHECK_GRADES).toEqual(['ELITE', 'STRONG', 'ACTION']);
   });
 });

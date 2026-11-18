@@ -964,16 +964,190 @@ export function mtfAutoRiskArmState(cfg = loadMtfAutoConfig()) {
     pauseAfter: cfg?.consecutiveLossPauseAfter,
     pauseMin: cfg?.consecutiveLossPauseMin,
   });
+  // v21.39.0 [MANUAL LANE PARITY]: the live-only streak above is correct for
+  // real-money arm state, but it reported streak 0 while the PAPER lane was
+  // churning 5 losses in a row. Surface the paper-scoped streak separately so
+  // the UI cannot claim "no pause" when manual paper entries are paused.
+  const consecutiveLossPaper = cfg?.paperLiveParity === true
+    ? evaluateConsecutiveLossPause({
+      closedRows: st.book.filter(b => b && b.status !== 'OPEN'
+        && String(b.executionMode || '').toUpperCase() !== 'LIVE'),
+      liveOnly: false,
+      pauseAfter: cfg?.consecutiveLossPauseAfter,
+      pauseMin: cfg?.consecutiveLossPauseMin,
+    })
+    : null;
   return {
     liveArm,
     liveArmBlocked: !liveArm.ok,
     liveArmBlockers: liveArm.blockers,
     consecutiveLoss,
+    consecutiveLossPaper,
     consecutiveLossPauseAfter: Number(cfg?.consecutiveLossPauseAfter) || 0,
     consecutiveLossPauseMin: Number(cfg?.consecutiveLossPauseMin) || 0,
     ackPhrase: RISK_ACK_PHRASE,
     presetOnly: true,
   };
+}
+
+/**
+ * v21.39.0 [MANUAL BOARD LANE PARITY] — the 🧪 PAPER / ⚡ LIVE board buttons
+ * are manual entries, but they only ran PRO + pre-entry + direction gates.
+ * The auto lane's evidence-driven entry gates were never applied:
+ *
+ *   • PAKKA direction (v21.36.8)         → paper parity requires VERIFIED
+ *   • ATR stop floor + FADING momentum   → the 0.77×ATR AVAX ticket the auto
+ *                                          lane explicitly vetoed on 17 Nov
+ *   • signal fidelity (CHOP/TRANSITION…) → v21.37.0 ledger's worst bucket
+ *   • loss-churn lock                    → re-entry after a fresh non-profit
+ *   • consecutive-loss pause             → PAPER closes count under parity
+ *   • maxOpenPositions / maxConcurrent   → manual clicks cannot exceed the
+ *                                          book cap the engine enforces
+ *
+ * One composer so routes.js never re-implements the sequence, and every
+ * evaluator stays the SAME pure function the auto tick uses. `paperLiveParity`
+ * (default ON) is the switch: false restores the old paper-exempt behaviour.
+ * Never throws; missing data fails OPEN exactly like the auto lane.
+ *
+ * @returns {{ok:boolean, blocked:boolean, lane:string, blockers:string[],
+ *            warnings:string[], telemetry:object, at:number}}
+ */
+export function evaluateManualEntryGates({
+  row = null, side = null, market = 'CRYPTO', lane = 'PAPER',
+  entry = null, stopLoss = null, atrPct = null,
+  cfg = null, now = Date.now(),
+} = {}) {
+  const c = cfg || loadMtfAutoConfig();
+  const isLiveLane = String(lane || 'PAPER').toUpperCase() === 'LIVE';
+  const laneLbl = isLiveLane ? 'LIVE' : 'PAPER';
+  const parity = c?.paperLiveParity === true;
+  const sym = normalizeLinkSymbol(row?.symbol, market)
+    || String(row?.symbol || '').toUpperCase()
+    || '—';
+  const sideNorm = normalizeSide(side || row?.side);
+  const blockers = [];
+  const telemetry = {
+    lane: laneLbl,
+    parity,
+    directionVerified: row?.directionVerified === true,
+    entryQuality: null,
+    fidelity: null,
+    churn: null,
+    lossPause: null,
+    caps: null,
+  };
+
+  // 1) PAKKA direction — parity extends the live lane's requirement to paper.
+  if ((isLiveLane || parity) && row?.directionVerified !== true) {
+    const verdict = row?.directionVerdict
+      || `WAIT-${String(sideNorm || row?.side || '').toUpperCase()}`;
+    blockers.push(`direction not PAKKA verified (${verdict})`);
+  }
+
+  // 2) Entry quality — stop must clear the entry-time noise band and the
+  //    trigger momentum must not already be FADING against the trade.
+  if (isLiveLane || parity) {
+    const q = evaluateLiveEntryQuality(row, { entry, stopLoss, atrPct });
+    telemetry.entryQuality = q;
+    if (q.blocked) blockers.push(`entry quality: ${q.reasons.join(' | ')}`);
+  }
+
+  // 3) Signal fidelity — identical scope rule as the auto lane.
+  const fidMode = signalFidelityMode();
+  const fidActiveForLane = parity || gateScopeApplies(c?.signalFidelityScope, isLiveLane);
+  if (fidMode !== 'off' && fidActiveForLane) {
+    try {
+      const ctx = fidelityContextFor(row);
+      const fid = evaluateSignalFidelity({
+        row,
+        side: sideNorm,
+        mode: fidMode,
+        familyFit: ctx.familyFit,
+        hierarchicalMtf: ctx.hierarchicalMtf,
+        cfg: c,
+        meanRevEnabled: ctx.meanRevEnabled,
+      });
+      telemetry.fidelity = {
+        filter: fid.filter, mode: fid.mode, wouldBlock: fid.wouldBlock,
+        reasons: fid.reasons, regime: fid.regime, rsi: fid.rsi, adx: fid.adx,
+        softPoints: fid.softPoints, availableSoft: fid.availableSoft,
+      };
+      // shadow = telemetry only; enforce = hard block (auto-lane semantics).
+      if (fid.wouldBlock && fidMode !== 'shadow') {
+        blockers.push(`signal fidelity: ${fid.reasons.join(' | ') || 'fidelity-veto'}`);
+      }
+    } catch { /* fail-open: a crashed evaluator must not fabricate a veto */ }
+  }
+
+  // 4) Loss-churn lock. LIVE keeps the operator's manual-close exemption;
+  //    the PAPER lane must see its own manual closes — that is precisely the
+  //    churn signature the 17 Nov sequence produced (BNB → BTC → DOGE re-entries).
+  const churnMode = lossChurnLockMode();
+  const churnActiveForLane = parity || gateScopeApplies(c?.lossChurnScope, isLiveLane);
+  if (churnMode !== 'off' && churnActiveForLane) {
+    try {
+      const churnCfg = isLiveLane ? c : { ...c, lossChurnIgnoreManual: false };
+      const churn = evaluateLossChurnLock({
+        symbol: sym,
+        side: sideNorm,
+        closedRows: _loadState().book,
+        now,
+        mode: churnMode,
+        cfg: churnCfg,
+        flipConfirmed: false,
+      });
+      telemetry.churn = {
+        filter: churn.filter, mode: churn.mode, wouldLock: churn.wouldLock,
+        reason: churn.reason, lossStreak: churn.lossStreak,
+        lastLossSide: churn.lastLossSide, lastCloseReason: churn.lastCloseReason,
+      };
+      if (churn.wouldLock && churnMode !== 'shadow') {
+        blockers.push(`loss-churn lock: ${churn.reason || 'recent non-profit close on this side'}`);
+      }
+    } catch { /* fail-open */ }
+  }
+
+  // 5) Consecutive-loss pause — LIVE stays live-only; PAPER parity counts
+  //    PAPER closes (the old liveOnly:true meant 5 paper losses never paused).
+  if (isLiveLane || parity) {
+    try {
+      const closed = _loadState().book.filter(b => b && b.status !== 'OPEN');
+      const closedRows = isLiveLane
+        ? closed
+        : closed.filter(b => String(b.executionMode || '').toUpperCase() !== 'LIVE');
+      const pause = evaluateConsecutiveLossPause({
+        closedRows,
+        liveOnly: isLiveLane,
+        pauseAfter: c?.consecutiveLossPauseAfter,
+        pauseMin: c?.consecutiveLossPauseMin,
+        now,
+      });
+      telemetry.lossPause = pause;
+      if (pause.blocked) blockers.push(pause.reason);
+    } catch { /* fail-open */ }
+  }
+
+  // 6) Concurrency cap — manual PAPER clicks respect the same book cap the
+  //    auto tick uses (maxConcurrentTrades in multi-trade, else maxOpenPositions).
+  //    LIVE keeps its stricter 1-session-1-trade lock in routes.js.
+  if (!isLiveLane) {
+    const multiTrade = c?.multiTradeMode === true;
+    const cap = Math.max(1, Number(
+      multiTrade ? c?.maxConcurrentTrades : c?.maxOpenPositions,
+    ) || (multiTrade ? 3 : 1));
+    const openPaper = _openLinked().filter(b => !isLiveSessionEntry(b));
+    telemetry.caps = { open: openPaper.length, cap, multiTrade };
+    if (openPaper.length >= cap) {
+      blockers.push(`max open PAPER positions ${openPaper.length}/${cap} — close an open trade first`);
+    }
+  }
+
+  const ok = blockers.length === 0;
+  _logEvent(
+    'manual-entry-gate',
+    `${sym}: ${laneLbl} ${ok ? 'parity gates passed' : `blocked — ${blockers.join(' | ')}`}`,
+  );
+  return { ok, blocked: !ok, lane: laneLbl, blockers, warnings: [], telemetry, at: now };
 }
 
 /**
@@ -5676,6 +5850,7 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     liveArmBlocked: riskArmState.liveArmBlocked,
     liveArmBlockers: riskArmState.liveArmBlockers,
     consecutiveLoss: riskArmState.consecutiveLoss,
+    consecutiveLossPaper: riskArmState.consecutiveLossPaper,
     riskArmPreset: { ...riskArmState.liveArm.preset },
     riskArmPresetOnly: true,
     ackPhrase: riskArmState.ackPhrase,

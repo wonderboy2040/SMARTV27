@@ -8,7 +8,7 @@
 // polls a 5s snapshot, and a 30s watchdog refreshes boards +
 // re-votes the committee.
 //
-// Every STRONG/ACTION signal across all four desks shows its LIVE
+// Every ELITE/STRONG/ACTION signal across all four desks shows its LIVE
 // recheck state —
 //   🚨 INVALIDATED (SL through — entry mat karo)
 //   ⚠️ WEAKENING   (>0.75 ATR against the signal)
@@ -230,6 +230,7 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
   const rows = (view?.rows || []).filter(r => !market || r.market === market || r.isAutoTrade);
   const activeAutoTrades = (view?.autoTradeDeepMonitor?.trades || []).filter(t => t.traded !== false);
   const problems = rows.filter(r => r.state === 'INVALIDATED' || r.state === 'WEAKENING').length;
+  const eliteN = rows.filter(r => r.grade === 'ELITE').length;
   const strongN = rows.filter(r => r.grade === 'STRONG').length;
   const nextIn = view?.nextTickIn != null ? Math.max(0, Math.round(view.nextTickIn / 1000)) : null;
   // v21.28.0 F9 heartbeat: null = never stamped (unknown/starting), true = a
@@ -251,8 +252,8 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
             </span>
             {view && (
               <>
-                <span className="px-2 py-0.5 rounded-lg text-[9px] font-black border bg-black/30 text-slate-400 border-slate-600/30" title="Strong + Action signals under watch">
-                  👁 {view.watched} watched · {strongN} STRONG
+                <span className="px-2 py-0.5 rounded-lg text-[9px] font-black border bg-black/30 text-slate-400 border-slate-600/30" title="ELITE + STRONG + ACTION signals under watch">
+                  👁 {view.watched} watched · {eliteN} ELITE · {strongN} STRONG
                 </span>
                 {problems > 0 && (
                   <span className="px-2 py-0.5 rounded-lg text-[9px] font-black border bg-red-500/15 text-red-300 border-red-500/40">
@@ -463,7 +464,7 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
 
       {view && rows.length === 0 && (
         <div className="text-[10px] text-slate-500 py-3 text-center">
-          Abhi koi STRONG/ACTION signal watch me nahi hai — board par jab bhi aayega, realtime WS watch khud shuru ho jayega.
+          Abhi koi ELITE/STRONG/ACTION signal watch me nahi hai — board par jab bhi aayega, realtime WS watch khud shuru ho jayega.
         </div>
       )}
 
@@ -481,7 +482,7 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
                   <span className="text-slate-500">{DESK_TAG[r.market] || '·'}</span>
                   <span className="font-black text-slate-200">{r.symbol}</span>
                   <span className={`font-black ${long ? 'text-emerald-400' : 'text-red-400'}`}>{r.side}</span>
-                  <span className={`px-1.5 py-0.5 rounded font-black border ${r.grade === 'STRONG' ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40' : 'bg-slate-600/20 text-slate-300 border-slate-600/40'}`}>
+                  <span className={`px-1.5 py-0.5 rounded font-black border ${r.grade === 'ELITE' ? 'bg-violet-500/20 text-violet-300 border-violet-500/50' : r.grade === 'STRONG' ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40' : 'bg-slate-600/20 text-slate-300 border-slate-600/40'}`}>
                     {r.grade}{r.aiScore != null ? ` · ${r.aiScore}` : ''}
                   </span>
                   <span className={`px-1.5 py-0.5 rounded font-black border ${st.chip}`}>{st.label}</span>

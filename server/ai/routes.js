@@ -238,7 +238,7 @@ import { buildAccuracyDashboard } from './accuracyDashboard.js';
 import { flagMatrixSnapshot, applyFlagChange } from './championChallenger.js';
 // v21.32.0 [PHASE B3]: latency P50/P95 lanes (honest upstream-feed measurement).
 import { latencyRecorder } from './lib/latencyStats.js';
-import { mtfAutoTick, mtfAutoStatus, mtfAutoRiskArmState, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, metalsSymbolOf, metalsEntryGate, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason, preEntryRecheckMode } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, mtfAutoRiskArmState, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, metalsSymbolOf, metalsEntryGate, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason, preEntryRecheckMode, evaluateManualEntryGates } from './mtfAutoLink.js';
 import { startSniper, stopSniper, sniperStatus } from './sniperEntryEngine.js';
 // v21.29.0 [R2 RISK ARM] — arm blockers / typed override / SAFE preset.
 import { RISK_ACK_PHRASE, evaluateLiveArmRisk, evaluateLiveArmConfigPatch, describeDeskArmState } from './riskArm.js';
@@ -1273,6 +1273,32 @@ export function registerAITradingRoutes(app, deps) {
           directionCertificate, orderSide: directionCertificate.orderSide,
         });
       }
+      // v21.39.0 [MANUAL LANE PARITY] — the auto tick's evidence-driven entry
+      // gates now run for a manual click too: PAKKA direction, ATR stop floor,
+      // FADING momentum, signal fidelity, loss-churn lock, paper loss-streak
+      // pause and the maxOpenPositions/maxConcurrentTrades book cap. Without
+      // this, 17 Nov's AVAX ticket (stop 0.69% = 0.77× ATR) was vetoed by the
+      // auto lane and still opened from the board button.
+      const entryAtrPct = Number(row.context?.atrPct) > 0 ? Number(row.context.atrPct)
+        : Number(row.atrPct) > 0 ? Number(row.atrPct) : null;
+      const manualGate = evaluateManualEntryGates({
+        row,
+        side: rowSide,
+        market,
+        lane: 'PAPER',
+        entry: Number(row.plan?.entry),
+        stopLoss: Number(row.plan?.stopLoss),
+        atrPct: entryAtrPct,
+        cfg,
+      });
+      if (!manualGate.ok) {
+        const parityWhy = manualGate.blockers.join(' | ');
+        const parityMsg = `${symbol}: PAPER ${rowSide} blocked — manual-lane parity: ${parityWhy}`;
+        return res.status(409).json({
+          ok: false, blocked: true, error: parityMsg, reason: parityMsg,
+          blockers: manualGate.blockers, manualGate,
+        });
+      }
       const isUsd = market === 'CRYPTO' || market === 'FUTURES' || market === 'METALS' || market === 'GLOBALFUTURES';
       const execMarket = market === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : isUsd ? 'FUTURES' : 'INDIA';
       const baseSym = normalizeLinkSymbol(row.symbol, market) || symbol;
@@ -1309,6 +1335,7 @@ export function registerAITradingRoutes(app, deps) {
       const r0 = openPaperTradeExec({
         symbol: baseSym, direction: rowSide, entry, qty, stopLoss: sl, target1: t1, target2: t2,
         market: execMarket,
+        atrPct: entryAtrPct,
         source: 'mtf-board-ui',
         sourceMeta: {
           score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin, superSymbol: row.symbol,
@@ -1325,7 +1352,31 @@ export function registerAITradingRoutes(app, deps) {
             ok: directionCertificate.ok,
             label: directionCertificate.label,
           },
-          entryGate: 'PRO_V1',
+          entryGate: 'MANUAL_PARITY_V1',
+          preEntryState: preGate.verdict?.state ?? null,
+          entryQuality: manualGate.telemetry.entryQuality ? {
+            blocked: manualGate.telemetry.entryQuality.blocked,
+            slAtrMult: manualGate.telemetry.entryQuality.slAtrMult,
+            atrPct: manualGate.telemetry.entryQuality.atrPct,
+            momentumState: manualGate.telemetry.entryQuality.momentumState,
+          } : null,
+          fidelity: manualGate.telemetry.fidelity ? {
+            mode: manualGate.telemetry.fidelity.mode,
+            wouldBlock: manualGate.telemetry.fidelity.wouldBlock,
+            regime: manualGate.telemetry.fidelity.regime,
+            rsi: manualGate.telemetry.fidelity.rsi,
+            adx: manualGate.telemetry.fidelity.adx,
+          } : null,
+          lossChurn: manualGate.telemetry.churn ? {
+            mode: manualGate.telemetry.churn.mode,
+            wouldLock: manualGate.telemetry.churn.wouldLock,
+            lossStreak: manualGate.telemetry.churn.lossStreak,
+          } : null,
+          lossPause: manualGate.telemetry.lossPause ? {
+            streak: manualGate.telemetry.lossPause.streak,
+            threshold: manualGate.telemetry.lossPause.threshold,
+            blocked: manualGate.telemetry.lossPause.blocked,
+          } : null,
         },
         label: `MTF BOARD · ${row.tier} ${row.superScore} · ${row.label} ${row.holdMin}m · ${isUsd ? 'USDT' : '₹'}`,
       });
@@ -1366,6 +1417,14 @@ export function registerAITradingRoutes(app, deps) {
           ok: preGate.verdict.ok, state: preGate.verdict.state,
           warnings: preGate.verdict.warnings, metrics: preGate.verdict.metrics,
         } : null,
+        manualGate: {
+          ok: manualGate.ok, lane: manualGate.lane, parity: manualGate.telemetry.parity,
+          entryQuality: manualGate.telemetry.entryQuality,
+          fidelity: manualGate.telemetry.fidelity,
+          lossChurn: manualGate.telemetry.churn,
+          lossPause: manualGate.telemetry.lossPause,
+          caps: manualGate.telemetry.caps,
+        },
         row: {
           symbol, side: rowSide, orderSide: directionCertificate.orderSide,
           signalToOrder: `${rowSide} → ${directionCertificate.orderSideLabel}`,
@@ -1506,6 +1565,29 @@ export function registerAITradingRoutes(app, deps) {
         return res.status(409).json({
           ok: false, blocked: true, error: certMsg, reason: certMsg,
           directionCertificate, orderSide: directionCertificate.orderSide,
+        });
+      }
+      // v21.39.0 [MANUAL LANE PARITY] — auto lane ke ATR stop-floor / FADING
+      // momentum / fidelity / loss-churn / loss-streak gates ab manual LIVE
+      // click par bhi. Paper route jaisa hi composer, lane='LIVE'.
+      const entryAtrPct = Number(row.context?.atrPct) > 0 ? Number(row.context.atrPct)
+        : Number(row.atrPct) > 0 ? Number(row.atrPct) : null;
+      const manualGate = evaluateManualEntryGates({
+        row,
+        side,
+        market,
+        lane: 'LIVE',
+        entry: Number(row.plan?.entry),
+        stopLoss: Number(row.plan?.stopLoss),
+        atrPct: entryAtrPct,
+        cfg,
+      });
+      if (!manualGate.ok) {
+        const parityWhy = manualGate.blockers.join(' | ');
+        const parityMsg = `${symbol}: LIVE ${side} blocked — manual-lane parity: ${parityWhy}`;
+        return res.status(409).json({
+          ok: false, blocked: true, error: parityMsg, reason: parityMsg,
+          blockers: manualGate.blockers, manualGate,
         });
       }
 

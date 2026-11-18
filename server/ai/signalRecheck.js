@@ -12,7 +12,7 @@
 // THE LOOP:
 //   1. Read the CACHED boards (warmOnly — never triggers a cold
 //      universe scan; a stopped board is simply a paused watch).
-//   2. Watchlist = every STRONG + ACTION signal (the "80+ AI
+//   2. Watchlist = every ELITE + STRONG + ACTION signal (the "80+ AI
 //      score" tier and the tradeable tier below it) across all
 //      four desks: CRYPTO · FUTURES · INDIA · GLOBALFUTURES.
 //   3. REALTIME price recheck: liveFeed.subscribe → applyRealtimeTick.
@@ -49,7 +49,7 @@ export const RECHECK_WATCHDOG_MS = 30_000;
 /** @deprecated v21.26.3 — realtime prices come from the WS tick store;
  *  this alias is the watchdog cadence kept for API/back-compat. */
 export const RECHECK_TICK_MS = RECHECK_WATCHDOG_MS;
-export const RECHECK_GRADES = ['STRONG', 'ACTION'];
+export const RECHECK_GRADES = ['ELITE', 'STRONG', 'ACTION'];
 /** Staggered deep re-vote cadence: every Nth watchdog (~60s/symbol). */
 export const DEEP_REVOTE_EVERY_N_TICKS = 2;
 /** Max symbols sent through the cached deep path per watchdog (cost bound). */
@@ -67,7 +67,7 @@ export const ADVERSE_ATR_X = 0.75;
 /** v21.38.0: soft ATR band — under water but not yet a hard weakening. */
 export const CAUTION_ATR_X = 0.5;
 
-const GRADE_RANK = { NEUTRAL: 0, WATCH: 1, ACTION: 2, STRONG: 3 };
+const GRADE_RANK = { NEUTRAL: 0, WATCH: 1, ACTION: 2, STRONG: 3, ELITE: 4 };
 const _num = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
 
 function _curOf(market) {
@@ -80,9 +80,10 @@ export function recheckEnabled() {
 
 // ---------------- pure: watchlist selection ----------------
 /**
- * STRONG + ACTION rows from the cached boards → the watch map
- * ("MKT:SYM" → row). STRONG wins when both grades somehow appear
- * for one symbol (board + fresh deep re-vote racing).
+ * ELITE + STRONG + ACTION rows from the cached boards → the watch map
+ * ("MKT:SYM" → row). The highest grade wins when several flavors race for
+ * one symbol (board + fresh deep re-vote). v21.39.0: ELITE was silently
+ * dropped here — a board row literally graded ELITE was never rechecked.
  * @param {Array<{market: string, signals: Array}>} boards
  * @returns {Map<string, object>}
  */
@@ -122,7 +123,7 @@ export function selectWatchlist(boards) {
         builtAt: _num(s.generatedAt) ?? _num(s.builtAt) ?? null,
       };
       const prev = out.get(key);
-      if (!prev || (grade === 'STRONG' && prev.grade !== 'STRONG')) out.set(key, row);
+      if (!prev || (GRADE_RANK[grade] ?? 0) > (GRADE_RANK[prev.grade] ?? 0)) out.set(key, row);
     }
   }
   return out;
@@ -540,12 +541,16 @@ export async function recheckTick(now = Date.now()) {
                 : 'FUTURES';
             const symUp = String(mr.symbol).toUpperCase();
             const wKey = `${mktKey}:${symUp}`;
-            const mappedGrade = (tier === 'ELITE' || tier === 'STRONG' || score >= 80) ? 'STRONG' : 'ACTION';
+            // v21.39.0: preserve the real tier — ELITE rows used to be
+            // flattened to STRONG, so the panel could not distinguish the
+            // strongest tier and ELITE→STRONG transitions were invisible.
+            const mappedGrade = tier === 'ELITE' ? 'ELITE'
+              : (tier === 'STRONG' || score >= 80) ? 'STRONG' : 'ACTION';
             const prev = watch.get(wKey);
             const prevIsMtf = prev?.fromMtfDualBoard === true;
             const fresher = (Number(mr.asOf) || 0) >= (Number(prev?.boardAt) || 0);
             const better = !prev
-              || (mappedGrade === 'STRONG' && prev.grade !== 'STRONG')
+              || (GRADE_RANK[mappedGrade] ?? 0) > (GRADE_RANK[prev.grade] ?? 0)
               || (score > (prev.aiScore || 0));
             // v21.38.0 [STALE-LEVELS FIX]: an MTF watch row used to keep the
             // FIRST-seen entry/SL for the whole day (equal score → no update),
@@ -807,7 +812,7 @@ export function signalRecheckStatus() {
   const stateRank = { INVALIDATED: 0, FLIPPED: 0, STRUCTURE_BREAK: 1, WEAKENING: 1, TARGET_2: 2, TARGET_1: 2, CAUTION: 3, PENDING: 3, OK: 4, EXPIRED: 5 };
   rows.sort((a, b) => (b.isAutoTrade ? 1 : 0) - (a.isAutoTrade ? 1 : 0)
     || (stateRank[a.state] ?? 3) - (stateRank[b.state] ?? 3)
-    || (b.grade === 'STRONG' ? 1 : 0) - (a.grade === 'STRONG' ? 1 : 0)
+    || (GRADE_RANK[b.grade] ?? 0) - (GRADE_RANK[a.grade] ?? 0)
     || (b.lastCheckAt || 0) - (a.lastCheckAt || 0));
   return {
     ok: true,
@@ -831,7 +836,7 @@ export function signalRecheckStatus() {
     eventsFeed: _state.events.slice(0, 12),
     autoTradeDeepMonitor,
     rows,
-    note: 'Har STRONG/ACTION signal + Active Auto-Trade har live WebSocket tick par price-recheck hota hai (per-row 1s throttle); 30s watchdog board refresh + committee re-vote + REST fallback chalata hai. Deep Monitor: Dynamic SL Trail · Reversal Profit-Book · T1/T2 touch. Events Telegram par bhi jate hain.',
+    note: 'Har ELITE/STRONG/ACTION signal + Active Auto-Trade har live WebSocket tick par price-recheck hota hai (per-row 1s throttle); 30s watchdog board refresh + committee re-vote + REST fallback chalata hai. Deep Monitor: Dynamic SL Trail · Reversal Profit-Book · T1/T2 touch. Events Telegram par bhi jate hain.',
   };
 }
 
