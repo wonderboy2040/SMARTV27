@@ -28,6 +28,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { tryParseJson } from './llmJson.js';
 
 export const FREELLMAPI_PROVIDER = 'freellmapi';
@@ -57,6 +58,57 @@ const DEFAULT_ROOTS = [
 // Probe cache: positive 30s, negative 12s. A manual recheck bypasses it.
 const PROBE_TTL_OK_MS = 30_000;
 const PROBE_TTL_FAIL_MS = 12_000;
+
+// v21.41.0 [ANALYSIS OPTIMIZATION]: identical strict-JSON questions arrive in
+// bursts (board scan + expert picks + deep recheck on the same symbol). A
+// short TTL + single-flight keeps ONE upstream call per unique prompt while
+// never changing a verdict: only successful parses are cached.
+const JSON_CACHE_MAX = 200;
+const JSON_CACHE_TTL_DEFAULT_MS = 20_000;
+const _jsonCache = new Map();      // key -> { at, value }
+const _jsonInflight = new Map();   // key -> Promise<result>
+const _jsonCacheStats = { hits: 0, inflightHits: 0, misses: 0, fallbacks: 0 };
+
+function _jsonCacheTtlMs() {
+  const n = Number(process.env.FREELLMAPI_JSON_CACHE_TTL_MS);
+  if (!Number.isFinite(n)) return JSON_CACHE_TTL_DEFAULT_MS;
+  return Math.max(0, Math.min(300_000, Math.round(n)));
+}
+
+function _jsonCacheKey(prompt, { system, model, temperature, maxTokens } = {}) {
+  const h = createHash('sha1');
+  h.update(String(model ?? ''));
+  h.update('\u0000');
+  h.update(String(temperature ?? ''));
+  h.update('\u0000');
+  h.update(String(maxTokens ?? ''));
+  h.update('\u0000');
+  h.update(String(system ?? ''));
+  h.update('\u0000');
+  h.update(typeof prompt === 'string' ? prompt : JSON.stringify(prompt ?? null));
+  return h.digest('hex');
+}
+
+function _pruneJsonCache(now) {
+  const ttl = _jsonCacheTtlMs();
+  for (const [k, v] of _jsonCache) {
+    if (ttl <= 0 || now - v.at > ttl) _jsonCache.delete(k);
+  }
+  while (_jsonCache.size > JSON_CACHE_MAX) {
+    const oldest = _jsonCache.keys().next().value;
+    if (oldest == null) break;
+    _jsonCache.delete(oldest);
+  }
+}
+
+export function __resetFreeLlmJsonCacheForTests() {
+  _jsonCache.clear();
+  _jsonInflight.clear();
+  _jsonCacheStats.hits = 0;
+  _jsonCacheStats.inflightHits = 0;
+  _jsonCacheStats.misses = 0;
+  _jsonCacheStats.fallbacks = 0;
+}
 
 const _state = {
   baseUrl: '',
@@ -295,6 +347,16 @@ export function freeLlmStatus() {
     probeLatencyMs: _state.probeLatencyMs,
     lastRoutedVia: _state.lastRoutedVia,
     lastError: _state.lastError,
+    // v21.41.0 [ANALYSIS OPTIMIZATION]: strict-JSON single-flight cache proof.
+    jsonCache: {
+      ttlMs: _jsonCacheTtlMs(),
+      entries: _jsonCache.size,
+      inflight: _jsonInflight.size,
+      hits: _jsonCacheStats.hits,
+      inflightHits: _jsonCacheStats.inflightHits,
+      misses: _jsonCacheStats.misses,
+      fallbacks: _jsonCacheStats.fallbacks,
+    },
   };
 }
 
@@ -437,24 +499,77 @@ export async function freeLlmJson(prompt, {
     maxTokens,
     timeoutMs,
   };
-  // v21.36.2 [JSON-MODE FIX — LIVE-CAUGHT]: auto:fast ne prose answer diya
-  // (reasoning text, no object) → llmChain ne "no-json response" track karke
-  // 2 fails par breaker arm kar diya aur poora AI lane 5-min cooldown me chala
-  // gaya. FreeLLMAPI OpenAI-compatible response_format support karta hai
-  // (verified live: auto:fast + response_format={"type":"json_object"} →
-  // clean {"ok":true}). Yahan force karo; strict system prompt backup rehta hai.
-  let out;
-  try {
-    out = await freeLlmChat({ ...req, jsonMode: true });
-  } catch (e) {
-    // Kuch upstream models response_format reject karte hain (400/422) —
-    // un par ek baar plain retry, warna valid verdicts permanently block ho
-    // jate. Koi silent JSON fabrication nahi: text wahi strict parser se
-    // guzarta hai.
-    if (e?.status === 400 || e?.status === 422) out = await freeLlmChat({ ...req, jsonMode: false });
-    else throw e;
+  const ttl = _jsonCacheTtlMs();
+  const cacheKey = ttl > 0
+    ? _jsonCacheKey(prompt, { system, model, temperature, maxTokens })
+    : null;
+  if (cacheKey) {
+    const hit = _jsonCache.get(cacheKey);
+    if (hit && Date.now() - hit.at <= ttl) {
+      _jsonCacheStats.hits += 1;
+      return { ...hit.value, cached: true, cacheAgeMs: Date.now() - hit.at };
+    }
+    if (hit) _jsonCache.delete(cacheKey);
+    // Single-flight: three analysis lanes asking the same question at the same
+    // moment share ONE upstream call instead of tripling the router load.
+    const pending = _jsonInflight.get(cacheKey);
+    if (pending) {
+      _jsonCacheStats.inflightHits += 1;
+      return pending;
+    }
+    _jsonCacheStats.misses += 1;
   }
-  return { ...out, json: tryParseJson(out.text) };
+
+  const work = (async () => {
+    // v21.36.2 [JSON-MODE FIX — LIVE-CAUGHT]: auto:fast ne prose answer diya
+    // (reasoning text, no object) → llmChain ne "no-json response" track karke
+    // 2 fails par breaker arm kar diya aur poora AI lane 5-min cooldown me chala
+    // gaya. FreeLLMAPI OpenAI-compatible response_format support karta hai
+    // (verified live: auto:fast + response_format={"type":"json_object"} →
+    // clean {"ok":true}). Yahan force karo; strict system prompt backup rehta hai.
+    let out;
+    try {
+      out = await freeLlmChat({ ...req, jsonMode: true });
+    } catch (e) {
+      // Kuch upstream models response_format reject karte hain (400/422) —
+      // un par ek baar plain retry, warna valid verdicts permanently block ho
+      // jate. Koi silent JSON fabrication nahi: text wahi strict parser se
+      // guzarta hai.
+      if (e?.status === 400 || e?.status === 422) out = await freeLlmChat({ ...req, jsonMode: false });
+      else throw e;
+    }
+    let json = tryParseJson(out.text);
+    // v21.41.0 [NO-JSON FALLBACK]: a prose answer from the routed model is a
+    // model-fit problem, not a router outage. ONE retry on `auto:reliable`
+    // (unless that is already the model) — still strictly parsed, still
+    // honest when it fails. This stops a single chatty model from parking the
+    // whole analysis lane in the llmChain breaker.
+    if (!json && model !== FREELLMAPI_MODELS.reliable) {
+      _jsonCacheStats.fallbacks += 1;
+      try {
+        const alt = await freeLlmChat({ ...req, model: FREELLMAPI_MODELS.reliable, jsonMode: true });
+        const altJson = tryParseJson(alt.text);
+        if (altJson) {
+          json = altJson;
+          out = alt;
+        }
+      } catch { /* keep the honest null verdict */ }
+    }
+    const result = { ...out, json };
+    if (cacheKey && result.json) {
+      const now = Date.now();
+      _jsonCache.set(cacheKey, { at: now, value: result });
+      _pruneJsonCache(now);
+    }
+    return result;
+  })();
+
+  if (cacheKey) {
+    _jsonInflight.set(cacheKey, work);
+    const clear = () => _jsonInflight.delete(cacheKey);
+    work.then(clear, clear);
+  }
+  return work;
 }
 
 function _asDataUrl(image) {
@@ -561,6 +676,12 @@ export function __resetFreeLlmForTests() {
   _state.lastError = null;
   _state.probeLatencyMs = null;
   _state.lastRoutedVia = null;
+  _jsonCache.clear();
+  _jsonInflight.clear();
+  _jsonCacheStats.hits = 0;
+  _jsonCacheStats.inflightHits = 0;
+  _jsonCacheStats.misses = 0;
+  _jsonCacheStats.fallbacks = 0;
 }
 
 export const __testables = { _candidateRoots, _dbCandidates, _cleanBase, _visionLadder };

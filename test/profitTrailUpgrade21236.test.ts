@@ -391,8 +391,10 @@ describe('v21.23.6 G2 — LIVE session entry = ELITE/STRONG (superScore>=80) ONL
     expect(out.opened).toHaveLength(1);
   });
 
-  it('PAPER session (no siteLiveActive): ACTION-tier row still opens — paper mode UNCHANGED', async () => {
-    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
+  it('PAPER session (no siteLiveActive): ACTION-tier row still opens with legacy autoStrongOnly:false - paper floor contract', async () => {
+    // v21.41.0: STRONG/ELITE-only is the new default for BOTH lanes. This
+    // test pins the LEGACY paper floor contract, so opt out explicitly.
+    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75, autoStrongOnly: false } });
     const { paper } = fakePaper();
     const out = await mtfAutoTick(liveP(paper, {
       boards: { CRYPTO: boardFixture('BTCUSDT', { tier: 'ACTION', superScore: 76 }) },

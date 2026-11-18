@@ -12,13 +12,18 @@ const _sourceSeen = {};          // source -> last tick epoch (for feed-status)
 
 export function setTick(key, data, source) {
   if (!key || !(data?.price > 0)) return;
+  const now = Date.now();
   const tick = {
     price: data.price,
     change: typeof data.change === 'number' ? data.change : 0,
     high: data.high ?? data.price,
     low: data.low ?? data.price,
     volume: data.volume ?? 0,
-    time: data.time ?? Date.now(),
+    time: data.time ?? now,
+    // v21.41.0 [ENTRY QUOTE FRESHNESS]: exchange time can be seconds old (or
+    // clock-skewed). This is the local INGEST timestamp the entry gate trusts
+    // when it asks "is this quote still tradeable?".
+    receivedAt: now,
     source: source || data.source || 'live',
     // 2026 P&L accuracy pass: the REAL previous close (when the source
     // provides it) so Today's P&L = (price - prevClose) * qty exactly —
@@ -34,6 +39,66 @@ export function setTick(key, data, source) {
 
 export function getTick(key) {
   return _ticks.get(key) || null;
+}
+
+/**
+ * v21.41.0 [ENTRY QUOTE FRESHNESS] — liveFeed namespaces a board symbol can
+ * legitimately appear under. `execMarket` is the ticket's execution desk
+ * (INDIA / FUTURES / GLOBALFUTURES). The expected namespace is probed first;
+ * the siblings are only used when their price is within `quoteFreshness`'s
+ * tolerance (so an INR spot tick can never masquerade as a USDT perp quote).
+ *
+ * @param {string} symbol
+ * @param {string} [execMarket]
+ * @returns {string[]}
+ */
+export function entryFeedKeys(symbol, execMarket) {
+  const sym = String(symbol || '').toUpperCase().replace(/^(FUT_|GLOB_|IN_|US_)/, '');
+  if (!sym) return [];
+  const exec = String(execMarket || '').toUpperCase();
+  const primary = exec === 'INDIA'
+    ? `IN_${sym}`
+    : (exec === 'GLOBALFUTURES' ? `GLOB_${sym}` : `FUT_${sym}`);
+  const keys = [primary];
+  for (const k of [`FUT_${sym}`, `IN_${sym}`, `GLOB_${sym}`, `US_${sym}`]) {
+    if (!keys.includes(k)) keys.push(k);
+  }
+  return keys;
+}
+
+/**
+ * v21.41.0 [ENTRY QUOTE FRESHNESS] — one small helper shared by the manual
+ * and auto entry lanes. It returns the age of the freshest liveFeed tick whose
+ * price still matches the quote being evaluated, or null when no comparable
+ * tick exists (missing evidence must fail OPEN, never fabricate a stale block).
+ *
+ * @param {string[]} keys            candidate liveFeed keys (FUT_BTC, IN_BTC…)
+ * @param {number}   price           the quote the entry gate is about to use
+ * @param {{now?:number, tolerancePct?:number}} [opts]
+ * @returns {{ageMs:number, source:string|null, key:string, price:number}|null}
+ */
+export function quoteFreshness(keys, price, { now = Date.now(), tolerancePct = 1 } = {}) {
+  const px = Number(price);
+  if (!(px > 0)) return null;
+  const tol = Math.max(0, Math.min(10, Number(tolerancePct) || 1)) / 100;
+  let best = null;
+  for (const key of Array.isArray(keys) ? keys : [keys]) {
+    const t = _ticks.get(key);
+    const tickPx = Number(t?.price);
+    const receivedAt = Number(t?.receivedAt);
+    if (!(tickPx > 0) || !(receivedAt > 0)) continue;
+    if (Math.abs(tickPx - px) / px > tol) continue;
+    if (!best || receivedAt > best.receivedAt) {
+      best = { receivedAt, source: t.source || null, key, price: tickPx };
+    }
+  }
+  if (!best) return null;
+  return {
+    ageMs: Math.max(0, now - best.receivedAt),
+    source: best.source,
+    key: best.key,
+    price: best.price,
+  };
 }
 
 export function snapshot(keys) {

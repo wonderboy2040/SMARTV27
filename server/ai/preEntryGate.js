@@ -39,6 +39,8 @@ export const PRE_ENTRY_DEFAULTS = Object.freeze({
   blockAdverseAtrX: 0.75,
   /** A T1 closer than this many R at entry is a poor reward/risk ticket. */
   minT1RemainR: 0.35,
+  /** v21.41.0: a quote older than this cannot be trusted for an entry. */
+  maxQuoteAgeMs: 5_000,
 });
 
 const _num = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
@@ -129,6 +131,8 @@ function _sideStable(row) {
  * @param {number}   [p.rowAgeMs]   explicit row age (otherwise builtAt/asOf)
  * @param {boolean}  [p.requireVerified]  hard-require directionVerified===true
  * @param {boolean}  [p.requireDeepAligned] block deep side opposite (default true)
+ * @param {number}   [p.quoteAgeMs]  liveFeed ingest age of the quote, when known
+ * @param {string}   [p.quoteSource] feed that produced the quote (telemetry)
  * @param {object}   [p.thresholds] override PRE_ENTRY_DEFAULTS
  *
  * @returns {{
@@ -145,6 +149,8 @@ export function preEntryRecheck({
   rowAgeMs = null,
   requireVerified = false,
   requireDeepAligned = true,
+  quoteAgeMs = null,
+  quoteSource = null,
   thresholds = {},
 } = {}) {
   const t = { ...PRE_ENTRY_DEFAULTS, ...(thresholds && typeof thresholds === 'object' ? thresholds : {}) };
@@ -213,6 +219,17 @@ export function preEntryRecheck({
   // ---- staleness ------------------------------------------------------
   if (age != null && age > t.maxRowAgeMs) {
     block(`signal row ${Math.round(age / 1000)}s old > ${Math.round(t.maxRowAgeMs / 1000)}s (stale)`, 'STALE');
+  }
+  // v21.41.0 [QUOTE FRESHNESS]: the board row can be fresh while the quote
+  // it is priced against is minutes old (stale WS / dead REST leg). Only
+  // block when the age is KNOWN — a missing tick is missing evidence.
+  const qAge = _num(quoteAgeMs);
+  const maxQAge = _num(t.maxQuoteAgeMs);
+  if (qAge != null && qAge >= 0 && maxQAge != null && maxQAge > 0 && qAge > maxQAge) {
+    block(
+      `live quote ${(qAge / 1000).toFixed(1)}s old > ${(maxQAge / 1000).toFixed(1)}s (${quoteSource || 'feed'} stale)`,
+      'STALE',
+    );
   }
 
   // ---- price already through the plan --------------------------------
@@ -308,6 +325,8 @@ export function preEntryRecheck({
       atr,
       atrPct: entry > 0 && atr != null ? +(atr / entry * 100).toFixed(3) : null,
       rowAgeMs: age,
+      quoteAgeMs: qAge,
+      quoteSource: quoteSource || null,
       chaseRatio: chaseRatio == null ? null : Math.round(chaseRatio * 1000) / 1000,
       adverseRatio: adverseRatio == null ? null : Math.round(adverseRatio * 1000) / 1000,
       t1RemainR: t1RemainR == null ? null : Math.round(t1RemainR * 1000) / 1000,

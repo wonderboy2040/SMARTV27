@@ -65,6 +65,7 @@ describe('v21.38.0 — resolveRowAtr (real volatility, no blind 1.2%)', () => {
     expect(PRE_ENTRY_DEFAULTS.maxAdverseRiskRatio).toBeLessThanOrEqual(0.20);
     expect(PRE_ENTRY_DEFAULTS.blockAdverseAtrX).toBeLessThanOrEqual(0.75);
     expect(PRE_ENTRY_DEFAULTS.maxRowAgeMs).toBeLessThanOrEqual(120_000);
+    expect(PRE_ENTRY_DEFAULTS.maxQuoteAgeMs).toBeLessThanOrEqual(5_000);
   });
 });
 
@@ -84,6 +85,32 @@ describe('v21.38.0 — pure preEntryRecheck', () => {
     expect(out.ok).toBe(false);
     expect(out.state).toBe('STALE');
     expect(out.blockers.join(' ')).toMatch(/stale/i);
+  });
+
+  it('v21.41.0: blocks a stale live quote by ingest age, fails open when the age is unknown', () => {
+    const stale = preEntryRecheck({
+      row: row(), side: 'LONG', livePrice: 100, now: NOW,
+      quoteAgeMs: 6_000, quoteSource: 'coindcx-fut-ws',
+    });
+    expect(stale.ok).toBe(false);
+    expect(stale.state).toBe('STALE');
+    expect(stale.blockers.join(' ')).toMatch(/quote 6\.0s old/);
+    expect(stale.metrics.quoteAgeMs).toBe(6_000);
+    expect(stale.metrics.quoteSource).toBe('coindcx-fut-ws');
+
+    const fresh = preEntryRecheck({ row: row(), side: 'LONG', livePrice: 100, now: NOW, quoteAgeMs: 3_000 });
+    expect(fresh.ok).toBe(true);
+
+    // Missing tick timestamp = missing evidence, never a fabricated block.
+    const unknown = preEntryRecheck({ row: row(), side: 'LONG', livePrice: 100, now: NOW, quoteAgeMs: null });
+    expect(unknown.ok).toBe(true);
+
+    // Explicit threshold override (env/config surface).
+    const relaxed = preEntryRecheck({
+      row: row(), side: 'LONG', livePrice: 100, now: NOW, quoteAgeMs: 6_000,
+      thresholds: { maxQuoteAgeMs: 10_000 },
+    });
+    expect(relaxed.ok).toBe(true);
   });
 
   it('blocks a late chase >25% of risk past entry, allows 20%', () => {

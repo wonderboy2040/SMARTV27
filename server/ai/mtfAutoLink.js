@@ -45,6 +45,8 @@ import { fileURLToPath } from 'node:url';
 import { isNseMarketOpen, freshEntriesAllowedFor, dayKeyFor, istDayKey } from '../intraday/time.js';
 import { dualAutoCandidates, closedCandlesFor } from './mtfDualBoard.js';
 import { SUPER_TIERS } from './superIntel.js';
+// v21.41.0 [ENTRY QUOTE FRESHNESS] — shared liveFeed ingest-age probe.
+import { quoteFreshness, entryFeedKeys } from '../liveFeed.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor, evaluateFeeAwareReversalExit } from '../exec/sizing.js';
 // v21.23.15 [PHASE-3 PERSISTENCE]: config + state ab encrypted durable
 // mirror par bhi jaate hain — Render spin-down se auto-config (enabled /
@@ -157,6 +159,10 @@ export const MTF_AUTO_DEFAULTS = {
   mode: 'INTRADAY',                // dual-TF mode: INTRADAY (15m→5m) | SWING (1h→15m) | SCALP (5m→1m)
   holdMin: null,                   // null → mode ka default (INTRADAY 45 / SWING 120 / SCALP 20)
   minScore: 75,                    // user spec: 75+ ACTION/STRONG
+  // v21.41.0 [STRONG/ELITE-ONLY AUTO]: default ON — auto entries (paper AND
+  // live) require tier STRONG/ELITE (or superScore >= 80). `false` restores
+  // the legacy floor-only eligibility (env MTF_AUTO_STRONG_ONLY=0 window).
+  autoStrongOnly: true,
   riskPerTradeINR: 2000,           // per-trade risk budget (qty = risk ÷ |entry−SL|)
   maxPositionsINR: 100000,         // total OPEN notional budget (linked trades)
   maxNotionalPerTradeINR: 50000,   // single trade notional cap
@@ -296,6 +302,9 @@ export const MTF_AUTO_DEFAULTS = {
   preEntryMaxChaseRiskRatio: 0.25,
   preEntryMaxAdverseRiskRatio: 0.20,
   preEntryMaxRowAgeMs: 120_000,
+  // v21.41.0 [QUOTE FRESHNESS]: the board row can be fresh while the liveFeed
+  // tick it is priced against is stale (dead WS / silent REST leg). 5s.
+  preEntryMaxQuoteAgeMs: 5_000,
   // v21.38.0 [PAPER/LIVE PARITY] — the paper lane used to bypass the live
   // fidelity / loss-churn / entry-quality gates (BNB paper opened seconds
   // after the live lane blocked the same setup). Default ON: paper now runs
@@ -528,6 +537,23 @@ export function effectiveLiveFloor(cfg, liveActive) {
   return liveActive ? Math.max(stored, LIVE_MIN_ACTION_FLOOR) : stored;
 }
 
+// v21.41.0 [STRONG/ELITE-ONLY AUTO]: user spec — auto trade sirf STRONG (80+)
+// ya ELITE (85+) directional signals par lage, PAPER aur LIVE dono me. Tier
+// authoritative hai; tier missing ho to superScore >= STRONG floor. Explicit
+// opt-out: config `autoStrongOnly:false` ya env MTF_AUTO_STRONG_ONLY=0 (legacy
+// floor-only behaviour).
+const AUTO_STRONG_FLOOR = Number(SUPER_TIERS.STRONG) || 80;
+export const autoStrongFloor = () => AUTO_STRONG_FLOOR;
+export function isStrongSignal(row) {
+  const tier = String(row?.tier || '').toUpperCase();
+  if (tier === 'ELITE' || tier === 'STRONG') return true;
+  return Number(row?.superScore) >= AUTO_STRONG_FLOOR;
+}
+export function autoStrongOnlyEnabled(cfg) {
+  if (String(process.env.MTF_AUTO_STRONG_ONLY || '').trim() === '0') return false;
+  return cfg?.autoStrongOnly !== false;
+}
+
 function _save(file, obj) {
   // Boot window: local+durable writes are suppressed until the durable
   // restore has had its chance. Skipping only local persistence is not
@@ -658,6 +684,12 @@ function _sanitizeCfg(cfg) {
   out.preEntryMaxChaseRiskRatio = clampN(cfg.preEntryMaxChaseRiskRatio, 0.05, 0.75, 0.25);
   out.preEntryMaxAdverseRiskRatio = clampN(cfg.preEntryMaxAdverseRiskRatio, 0.05, 0.75, 0.20);
   out.preEntryMaxRowAgeMs = clampN(cfg.preEntryMaxRowAgeMs, 15_000, 900_000, 120_000);
+  out.preEntryMaxQuoteAgeMs = clampN(
+    process.env.MTF_PRE_ENTRY_MAX_QUOTE_AGE_MS || cfg.preEntryMaxQuoteAgeMs,
+    1_000, 120_000, 5_000,
+  );
+  out.autoStrongOnly = cfg.autoStrongOnly !== false
+    && String(process.env.MTF_AUTO_STRONG_ONLY || '').trim() !== '0';
   out.paperLiveParity = cfg.paperLiveParity !== false;
   // v21.29.0 [R3–R9] mode allowlist. Unknown/legacy values never silently
   // become enforce — each falls back to its documented default.
@@ -1236,6 +1268,8 @@ export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
       preEntryMaxChaseRiskRatio: Number(cfg?.preEntryMaxChaseRiskRatio) > 0 ? Number(cfg.preEntryMaxChaseRiskRatio) : 0.25,
       preEntryMaxAdverseRiskRatio: Number(cfg?.preEntryMaxAdverseRiskRatio) > 0 ? Number(cfg.preEntryMaxAdverseRiskRatio) : 0.20,
       preEntryMaxRowAgeMs: Number(cfg?.preEntryMaxRowAgeMs) > 0 ? Number(cfg.preEntryMaxRowAgeMs) : 120_000,
+      preEntryMaxQuoteAgeMs: Number(cfg?.preEntryMaxQuoteAgeMs) > 0 ? Number(cfg.preEntryMaxQuoteAgeMs) : 5_000,
+      autoStrongOnly: autoStrongOnlyEnabled(cfg),
     },
     calibration,
     shadowHarness: harness,
@@ -4415,6 +4449,20 @@ export async function mtfAutoTick(p = {}) {
         && !r.zoneWallVeto
         && !r.counterTrend
       );
+    // v21.41.0 [STRONG/ELITE-ONLY AUTO]: user spec — auto trade sirf
+    // STRONG (80+) / ELITE (85+) directional setups par. PAPER + LIVE dono.
+    // Legacy floor-only behaviour explicitly opt-out (`autoStrongOnly:false`
+    // / MTF_AUTO_STRONG_ONLY=0) — the old universalLiveFloor knobs stay
+    // valid in that mode. Metals-only lane bhi isi strict gate se guzarta hai.
+    const strongOnly = autoStrongOnlyEnabled(cfg);
+    if (strongOnly) {
+      const beforeStrongGate = eligible.length;
+      eligible = eligible.filter(isStrongSignal);
+      const dropped = beforeStrongGate - eligible.length;
+      if (dropped > 0) {
+        out.skipped.push(`${market}: STRONG/ELITE gate — ${dropped} eligible row(s) below STRONG (${AUTO_STRONG_FLOOR}+) skipped`);
+      }
+    }
     // In Live Auto mode, v21.23.6: ELITE/STRONG (or superScore >= 80) verified
     // signals are now REQUIRED — not just prioritized. "then phir auto trade
     // signals me elite top trade verify karke trade lagna chahiye" — weaker
@@ -4486,6 +4534,8 @@ export async function mtfAutoTick(p = {}) {
         && !r.counterTrend
         && r.dualAligned !== false
         && (r.tfFit === 'GOOD' || r.tfFit === 'OK' || r.tfFit == null)
+        // v21.41.0: fallback must never bypass the STRONG/ELITE-only policy.
+        && (!strongOnly || isStrongSignal(r))
         // P2.1: live branch — ACTION floor (65) enforced, not the stored value.
         && Number(r.superScore) >= effectiveLiveFloor(cfg, true)
         && Number(r.plan?.entry) > 0
@@ -4824,7 +4874,13 @@ export async function mtfAutoTick(p = {}) {
       // ACTION floor (65); paper/notify keep the stored universalLiveFloor so
       // backtests stay byte-identical.
       const pLiveFloor = effectiveLiveFloor(cfg, cfg.executionMode === 'live');
-      const isEliteOrStrong = row.tier === 'ELITE' || row.tier === 'STRONG' || row.tier === 'ACTION' || Number(row.superScore) >= pLiveFloor;
+      // v21.41.0: strict tier policy first (STRONG/ELITE or score ≥ 80); the
+      // legacy `row.tier === 'ACTION'` shortcut is REMOVED — it let an ACTION
+      // row bypass the live floor entirely. With autoStrongOnly:false the
+      // stored floor semantics (ACTION 65+) remain available for backtests.
+      const isEliteOrStrong = strongOnly
+        ? isStrongSignal(row)
+        : (row.tier === 'ELITE' || row.tier === 'STRONG' || Number(row.superScore) >= pLiveFloor);
       // v21.23.8: EQUITY SIM (GLOBALFUTURES) rows KABHI live order nahi lagati
       // — CoinDCX par US equities listed nahi, SIM/paper-only desk hai.
       // v21.24.0: liveEntryPaused ek DEFENCE-IN-DEPTH guard hai (primary pause
@@ -4876,6 +4932,11 @@ export async function mtfAutoTick(p = {}) {
       const parity = cfg.paperLiveParity === true;
       if (preMode !== 'off') {
         const preQuote = timingQuote != null ? timingQuote : (Number(row.ltp) > 0 ? Number(row.ltp) : null);
+        // v21.41.0 [QUOTE FRESHNESS]: reject a ticket whose liveFeed tick is
+        // older than the configured limit. Null (no comparable tick) fails OPEN.
+        const preFreshness = preQuote > 0
+          ? quoteFreshness(entryFeedKeys(sym, guardDesk), preQuote, { now })
+          : null;
         const pre = preEntryRecheck({
           row,
           side: row.side,
@@ -4883,10 +4944,13 @@ export async function mtfAutoTick(p = {}) {
           now,
           requireVerified: wantLiveOrder || parity,
           requireDeepAligned: true,
+          quoteAgeMs: preFreshness ? preFreshness.ageMs : null,
+          quoteSource: preFreshness ? preFreshness.source : null,
           thresholds: {
             maxChaseRiskRatio: Number(cfg.preEntryMaxChaseRiskRatio) || 0.25,
             maxAdverseRiskRatio: Number(cfg.preEntryMaxAdverseRiskRatio) || 0.20,
             maxRowAgeMs: Number(cfg.preEntryMaxRowAgeMs) || 120_000,
+            maxQuoteAgeMs: Number(cfg.preEntryMaxQuoteAgeMs) || 5_000,
           },
         });
         recordShadowDecision(guardState.shadowStats, {

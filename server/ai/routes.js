@@ -166,7 +166,7 @@ import {
   startManualTradeMonitor, manualMonitorStatus, flushManualState as _flushManualState,
   updateExcursion, manualStats,
 } from './manualTrades.js';
-import { getTick as _getTick, subscribe as subscribeLiveFeed } from '../liveFeed.js';
+import { getTick as _getTick, subscribe as subscribeLiveFeed, quoteFreshness, entryFeedKeys } from '../liveFeed.js';
 // v20.7.5 THE 15s SIGNAL RECHECK LOOP — every STRONG/ACTION board
 // signal re-validated against live prices every 15s (SL-through ·
 // adverse drift · T1/T2 touch) + staggered committee re-votes, with
@@ -1082,6 +1082,14 @@ export function registerAITradingRoutes(app, deps) {
       const px = m?.get(baseSym);
       if (px > 0) quote = px;
     }
+    // v21.41.0 [QUOTE FRESHNESS]: same liveFeed ingest-age probe as the auto
+    // lane. Market strings map to the execution desk's tick namespace.
+    const execDesk = market === 'INDIA'
+      ? 'INDIA'
+      : (market === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : 'FUTURES');
+    const freshness = quote > 0
+      ? quoteFreshness(entryFeedKeys(baseSym, execDesk), quote, { now })
+      : null;
     const verdict = preEntryRecheck({
       row,
       side,
@@ -1089,13 +1097,16 @@ export function registerAITradingRoutes(app, deps) {
       now,
       requireVerified: true,
       requireDeepAligned: true,
+      quoteAgeMs: freshness ? freshness.ageMs : null,
+      quoteSource: freshness ? freshness.source : null,
       thresholds: {
         maxChaseRiskRatio: Number(cfg.preEntryMaxChaseRiskRatio) || 0.25,
         maxAdverseRiskRatio: Number(cfg.preEntryMaxAdverseRiskRatio) || 0.20,
         maxRowAgeMs: Number(cfg.preEntryMaxRowAgeMs) || 120_000,
+        maxQuoteAgeMs: Number(cfg.preEntryMaxQuoteAgeMs) || 5_000,
       },
     });
-    return { mode, verdict, quote };
+    return { mode, verdict, quote, quoteAgeMs: freshness ? freshness.ageMs : null, quoteSource: freshness ? freshness.source : null };
   };
 
   // ---------------- v21.16.0 MTF SIGNALS BOARD (DUAL-TIMEFRAME) ----------------

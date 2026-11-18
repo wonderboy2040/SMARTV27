@@ -512,11 +512,15 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
     expect(calls.opened).toHaveLength(2);
   });
 
-  it('universalLiveFloor: live mode with floor 65 opens a score-65 row that floor-80 would skip', async () => {
+  it('universalLiveFloor: live mode with floor 65 opens a score-65 row that floor-80 would skip (legacy autoStrongOnly:false)', async () => {
     __resetMtfAutoForTests({
       config: {
         enabled: true, executionMode: 'live', multiTradeMode: true, maxConcurrentTrades: 3,
-        universalLiveFloor: 65, desks: { india: false, crypto: true },
+        universalLiveFloor: 65,
+        // v21.41.0: strict STRONG/ELITE auto policy is the new default; this
+        // test pins the LEGACY stored-floor contract, so opt out explicitly.
+        autoStrongOnly: false,
+        desks: { india: false, crypto: true },
       },
     });
     const { paper, calls } = fakePaper();
@@ -605,11 +609,13 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
     expect(liveExecute).not.toHaveBeenCalled();
   });
 
-  it('P2.1 live-min-action-floor: an ACTION-tier (score ≥ 65) live signal STILL opens even with stored floor:50', async () => {
+  it('P2.1 live-min-action-floor: an ACTION-tier (score ≥ 65) live signal STILL opens with stored floor:50 (legacy autoStrongOnly:false)', async () => {
     __resetMtfAutoForTests({
       config: {
         enabled: true, executionMode: 'live', multiTradeMode: true, maxConcurrentTrades: 3,
         universalTradeAll: true, universalLiveFloor: 50,
+        // v21.41.0: legacy floor contract — explicit opt-out of STRONG-only.
+        autoStrongOnly: false,
         desks: { india: false, crypto: true },
       },
     });
@@ -638,11 +644,13 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
     expect(liveExecute).toHaveBeenCalledTimes(1);
   });
 
-  it('P2.1 live-min-action-floor: paper mode honours the stored floor (a score-60 paper row still opens)', async () => {
+  it('P2.1 live-min-action-floor: paper mode honours the stored floor (a score-60 paper row still opens with legacy autoStrongOnly:false)', async () => {
     __resetMtfAutoForTests({
       config: {
         enabled: true, executionMode: 'paper', multiTradeMode: true, maxConcurrentTrades: 3,
         universalTradeAll: true, universalLiveFloor: 50,
+        // v21.41.0: legacy floor contract — explicit opt-out of STRONG-only.
+        autoStrongOnly: false,
         // v21.38.0: this test pins the PAPER-floor contract; the new default
         // `paperLiveParity` intentionally applies fidelity to paper and would
         // block this 60-score row on family minScore (65). Opt out explicitly.
@@ -677,6 +685,68 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
     expect(out.opened).toHaveLength(1);
     expect(out.opened[0].executionMode).toBe('PAPER');
     expect(liveExecute).not.toHaveBeenCalled();
+  });
+
+  it('v21.41.0 STRONG/ELITE-only (default): an ACTION 79 paper row is skipped with an explicit reason', async () => {
+    __resetMtfAutoForTests({
+      config: {
+        enabled: true, executionMode: 'paper', multiTradeMode: true, maxConcurrentTrades: 2,
+        minScore: 75, desks: { india: false, crypto: true },
+      },
+    });
+    const { paper, calls } = fakePaper();
+    const board = boardFixture('ADAUSDT', { tier: 'ACTION', superScore: 79 });
+    const out = await mtfAutoTick({ boards: { CRYPTO: board }, paper });
+    expect(out.opened).toHaveLength(0);
+    expect(calls.opened).toHaveLength(0);
+    expect(out.skipped.join(' ')).toMatch(/STRONG\/ELITE gate/);
+  });
+
+  it('v21.41.0 STRONG/ELITE-only (default): STRONG LONG and ELITE SHORT both paper-open (directional parity)', async () => {
+    __resetMtfAutoForTests({
+      config: {
+        enabled: true, executionMode: 'paper', multiTradeMode: true, maxConcurrentTrades: 2,
+        minScore: 75, riskPerTradeINR: 2000, desks: { india: false, crypto: true },
+      },
+    });
+    const { paper, calls } = fakePaper();
+    const longRow = boardFixture('ETHUSDT', { tier: 'STRONG', superScore: 82, side: 'LONG', dir: 1 }).rows[0];
+    const shortRow = boardFixture('SOLUSDT', {
+      tier: 'ELITE', superScore: 88, side: 'SHORT', dir: -1,
+      plan: { entry: 150, stopLoss: 153, t1: 144, t2: 138 },
+    }).rows[0];
+    const board = { ok: true, market: 'CRYPTO', mode: 'INTRADAY', holdMin: 45, minScore: 75, rows: [longRow, shortRow] };
+    const out = await mtfAutoTick({ boards: { CRYPTO: board }, paper });
+    expect(out.opened).toHaveLength(2);
+    const sides = calls.opened.map(c => c.direction).sort();
+    expect(sides).toEqual(['LONG', 'SHORT']);
+  });
+
+  it('v21.41.0 STRONG/ELITE-only (default): LIVE path takes the ELITE SHORT and blocks the ACTION LONG even with floor 65', async () => {
+    __resetMtfAutoForTests({
+      config: {
+        enabled: true, executionMode: 'live', multiTradeMode: true, maxConcurrentTrades: 2,
+        universalLiveFloor: 65, riskPerTradeINR: 2000,
+        desks: { india: false, crypto: true },
+      },
+    });
+    const { paper } = fakePaper();
+    const liveExecute = liveExec();
+    const actionLong = boardFixture('ADAUSDT', { tier: 'ACTION', superScore: 75, side: 'LONG', dir: 1 }).rows[0];
+    const eliteShort = boardFixture('SOLUSDT', {
+      tier: 'ELITE', superScore: 88, side: 'SHORT', dir: -1,
+      plan: { entry: 150, stopLoss: 153, t1: 144, t2: 138 },
+    }).rows[0];
+    const board = { ok: true, market: 'CRYPTO', mode: 'INTRADAY', holdMin: 45, minScore: 65, rows: [actionLong, eliteShort] };
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: board }, paper, liveExecute,
+      siteLiveByDesk: { crypto: true, india: false },
+    });
+    expect(out.opened).toHaveLength(1);
+    expect(out.opened[0].executionMode).toBe('LIVE');
+    expect(out.opened[0].side).toBe('SHORT');
+    expect(liveExecute).toHaveBeenCalledTimes(1);
+    expect(out.skipped.join(' ')).toMatch(/STRONG\/ELITE gate/);
   });
 
   it('v21.35.7 universalTradeAll OFF (default): availability-blocked signals do NOT fire live', async () => {
