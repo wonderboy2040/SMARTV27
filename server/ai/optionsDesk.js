@@ -17,15 +17,25 @@
 //      directionals / iron condor) with max P&L, breakevens, net
 //      Greeks and lot sizes.
 // ============================================================
-import { fetchNSEOptionChain, fetchBSEOptionChain, fetchYahooQuotes } from './data.js';
+import { fetchNSEOptionChain, fetchBSEOptionChain, fetchYahooQuotes, isNseOpen } from './data.js';
+import { chainConfluence } from './optionsFlow.js';
 import { bsPrice, bsGreeks, impliedVol as _impliedVol, yearsToExpiry, nextWeeklyExpiry, normCdf } from './lib/blackScholes.js';
 import { aggregateVotes as _aggregateVotes } from './ensemble.js';
 import { sessionPhase } from './probrain.js';
+import { getTick } from '../liveFeed.js';
 
 const RISK_FREE = 0.069; // ~RBI repo-ish risk-free for NSE pricing
 const STRIKE_STEPS = { NIFTY: 50, BANKNIFTY: 100, FINNIFTY: 50, MIDCPNIFTY: 25, NIFTYNXT50: 100, SENSEX: 100 };
 const LOT_SIZES = { NIFTY: 75, BANKNIFTY: 35, FINNIFTY: 65, MIDCPNIFTY: 140, NIFTYNXT50: 25, SENSEX: 20 };
 const IV_FLOOR = 0.10, IV_CAP = 0.60;
+// v21.42 SUPER-INTELLIGENCE SIGNALS: live-chain freshness gates + the
+// model-chain score ceiling. A Black-Scholes chain has no OI/PCR/GEX and
+// cannot be cross-checked against a live market — it must NEVER wear the
+// STRONG/ELITE badge (74 < the 75 STRONG bar), no matter how loud the
+// index consensus is.
+const OPTION_CHAIN_FRESH_MS = 45 * 1000;
+const OPTION_CHAIN_STALE_MS = 5 * 60 * 1000;
+const MODEL_CHAIN_SCORE_CAP = 74;
 
 // ------------------------------------------------------------
 // v11.1 NSE+SENSEX ADDENDUM — source honesty for model chains.
@@ -129,6 +139,52 @@ export function expiryLabel(expiry) {
 
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 const r1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
+
+/**
+ * v21.42: pick the nearest future expiry that actually HAS contracts in
+ * the fetched payload. Groww's SENSEX page carries only the CURRENT
+ * expiry's contracts (its expiryDates list still advertises later ones);
+ * on expiry-day after 15:30 the old code selected tomorrow's expiry,
+ * filtered zero rows and silently served a model chain while claiming
+ * "BSE unreachable". This makes the roll explicit instead.
+ */
+export function pickExpiryForChain(chain, { today, pastCloseToday = false } = {}) {
+  const rows = Array.isArray(chain?.rows) ? chain.rows : [];
+  const todayIso = today || (() => {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); }
+    catch { return new Date().toISOString().slice(0, 10); }
+  })();
+  const declared = (Array.isArray(chain?.expiryDates) ? chain.expiryDates : [])
+    .map(String)
+    .filter(d => d >= todayIso && !(pastCloseToday && d === todayIso))
+    .sort();
+  const countFor = (d) => rows.filter(r => String(r?.expiry || '') === d).length;
+  const withRows = declared.find(d => countFor(d) > 5) || null;
+  const expiry = withRows || declared[0] || null;
+  return {
+    expiry,
+    rows: expiry ? rows.filter(r => String(r?.expiry || '') === expiry) : [],
+    declared,
+    expiryRollPending: Boolean(expiry && countFor(expiry) <= 5),
+  };
+}
+
+/** v21.42: freshest liveFeed spot for an index (display/age only —
+ *  premium pricing stays on the chain's own internally-consistent spot). */
+function liveSpotFor(symbol, chainSpot) {
+  const key = `IN_${String(symbol || '').toUpperCase()}`;
+  const t = getTick(key);
+  const price = Number(t?.price);
+  if (!(price > 0)) return null;
+  const ageMs = Math.max(0, Date.now() - Number(t.receivedAt || 0));
+  return {
+    price: r2(price),
+    source: t.source || 'live-feed',
+    ageMs,
+    fresh: ageMs <= 5000,
+    deltaPct: chainSpot > 0 ? r2(((price - chainSpot) / chainSpot) * 100) : null,
+  };
+}
 
 // ---------------- chain analytics (works for BOTH sources) ----------------
 export function analyzeChain(chain, spot) {
@@ -375,35 +431,53 @@ export async function getOptionsDesk(symbol = 'NIFTY') {
   // which can never answer). Route it through the best-effort BSE
   // fetch; every other underlying keeps the proven NSE path.
   const isBseIndex = sym === 'SENSEX';
-  const [chain, quotes] = await Promise.all([
-    (isBseIndex ? fetchBSEOptionChain(sym) : fetchNSEOptionChain(sym)).catch(() => null),
+  // Compare against the IST calendar date (before 05:30 IST the UTC date is
+  // yesterday — an already-passed expiry would otherwise still be selectable).
+  const today = (() => {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); }
+    catch { return new Date().toISOString().slice(0, 10); }
+  })();
+  // v21.1.1 [audit C8]: 15:30 ke baad TODAY's expiry drop — degenerate
+  // zero-greeks table (T=0) serve hota tha jabki option settle ho chuka.
+  // Market-close ke baad sirf aagli expiry hi pick hogi.
+  const _pastCloseToday = (() => {
+    try {
+      const ist = new Date(Date.now() + 5.5 * 3600_000);
+      return ist.getUTCHours() > 15 || (ist.getUTCHours() === 15 && ist.getUTCMinutes() >= 30);
+    } catch { return false; }
+  })();
+  const fetchChain = (expiry) => (isBseIndex
+    ? fetchBSEOptionChain(sym, { expiry })
+    : fetchNSEOptionChain(sym, { expiry })).catch(() => null);
+  const [firstChain, quotes] = await Promise.all([
+    fetchChain(null),
     fetchYahooQuotes([sym, 'INDIAVIX']).catch(() => ({})),
   ]);
-  const spot = chain?.spot ?? quotes[sym]?.price ?? null;
+  let chain = firstChain;
+  // v21.42 EXPIRY-ROLL LIVE PATH: Groww's page server-renders ONE expiry
+  // (the current one by default). On expiry-day after 15:30 the desk must
+  // roll — ask the mirror for the next expiry directly (?expiry=YYYY-MM-DD)
+  // instead of silently degrading a reachable live chain to Black-Scholes.
+  if (chain) {
+    const firstPick = pickExpiryForChain(chain, { today, pastCloseToday: _pastCloseToday });
+    if (chain.via === 'groww' && firstPick.expiry && firstPick.expiryRollPending) {
+      const rolled = await fetchChain(firstPick.expiry);
+      if (rolled) chain = rolled;
+    }
+  }
+  const baseSpot = chain?.spot ?? quotes[sym]?.price ?? null;
+  const liveSpot = liveSpotFor(sym, baseSpot);
+  const spot = baseSpot ?? liveSpot?.price ?? null;
   const vix = quotes['INDIAVIX']?.price ?? null;
 
   let outChain = null, analytics = null;
+  let expiryRollPending = false, chainExpiries = [];
   if (chain && spot) {
-    // Pick the nearest weekly expiry from the exchange's own list. Compare against
-    // the IST calendar date (before 05:30 IST the UTC date is yesterday —
-    // an already-passed expiry would otherwise still be selectable).
-    const today = (() => {
-      try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); }
-      catch { return new Date().toISOString().slice(0, 10); }
-    })();
-    // v21.1.1 [audit C8]: 15:30 ke baad TODAY's expiry drop — degenerate
-    // zero-greeks table (T=0) serve hota tha jabki option settle ho chuka.
-    // Market-close ke baad sirf aagli expiry hi pick hogi.
-    const _pastCloseToday = (() => {
-      try {
-        const ist = new Date(Date.now() + 5.5 * 3600_000);
-        return ist.getUTCHours() > 15 || (ist.getUTCHours() === 15 && ist.getUTCMinutes() >= 30);
-      } catch { return false; }
-    })();
-    const exp = (chain.expiryDates || []).map(d => String(d))
-      .filter(d => d >= today && !(_pastCloseToday && d === today)).sort()[0]
-      || nextWeeklyExpiryFor(sym);
-    const rows = chain.rows.filter(r => r.expiry === exp);
+    const pick = pickExpiryForChain(chain, { today, pastCloseToday: _pastCloseToday });
+    const exp = pick.expiry || nextWeeklyExpiryFor(sym);
+    chainExpiries = pick.declared;
+    expiryRollPending = pick.expiryRollPending;
+    const rows = pick.rows;
     if (rows.length > 5) {
       outChain = { symbol: sym, spot: r2(spot), expiry: exp, rows, source: chain.source, via: chain.via || null, lotSize: Number(chain.lotSize) || null, fetchedAt: chain.fetchedAt };
       analytics = analyzeChain(outChain, spot);
@@ -425,9 +499,19 @@ export async function getOptionsDesk(symbol = 'NIFTY') {
     const sourceTag = isBseIndex ? SENSEX_MODEL_SOURCE : NIFTY_MODEL_SOURCE;
     outChain = buildSyntheticChain(sym, spot, iv, expiry, 21, sourceTag);
     if (outChain) {
-      syntheticNote = isBseIndex
-        ? `${SENSEX_MODEL_BANNER} Premiums below are Black-Scholes estimates (IV anchored to India VIX ${vix ? r1(vix) : 'n/a'} + India put-skew) — OI/PCR/GEX unavailable in model mode.`
-        : `NSE chain temporarily unreachable from this server (direct NSE + Groww public mirror dono tried; auto-retry chalu hai) — showing a Black-Scholes model chain (IV anchored to India VIX ${vix ? r1(vix) : 'n/a'} + India put-skew). Premiums are model estimates, NOT live quotes; OI/PCR unavailable in model mode. The next successful fetch restores live data.`;
+      // v21.42: distinguish a REACHABLE chain whose next-expiry contracts
+      // are not in the mirror payload yet (expiry roll) from a genuinely
+      // unreachable exchange. The old note claimed "unreachable" in both
+      // cases — wrong on expiry-day evenings.
+      if (chain && expiryRollPending) {
+        syntheticNote = isBseIndex
+          ? `BSE SENSEX chain reachable hai, par Groww mirror payload me next expiry (${chainExpiries[0] || expiry}) ke contracts abhi nahi hain (expiry roll ke baad update hota hai). Isliye premiums Black-Scholes estimates hain (IV anchored to India VIX ${vix ? r1(vix) : 'n/a'} + India put-skew) — OI/PCR/GEX unavailable. Live SENSEX premiums ke liye apna broker cross-check karo.`
+          : `NSE chain reachable hai, par selected expiry (${chainExpiries[0] || expiry}) ke contracts payload me nahi mile (expiry roll). Premiums Black-Scholes estimates hain (IV anchored to India VIX ${vix ? r1(vix) : 'n/a'} + India put-skew) — OI/PCR unavailable. Agli successful fetch par live data restore hoga.`;
+      } else {
+        syntheticNote = isBseIndex
+          ? `${SENSEX_MODEL_BANNER} Premiums below are Black-Scholes estimates (IV anchored to India VIX ${vix ? r1(vix) : 'n/a'} + India put-skew) — OI/PCR/GEX unavailable in model mode.`
+          : `NSE chain temporarily unreachable from this server (direct NSE + Groww public mirror dono tried; auto-retry chalu hai) — showing a Black-Scholes model chain (IV anchored to India VIX ${vix ? r1(vix) : 'n/a'} + India put-skew). Premiums are model estimates, NOT live quotes; OI/PCR unavailable in model mode. The next successful fetch restores live data.`;
+      }
       analytics = null; // honest: no real OI → no PCR/max-pain
     }
   }
@@ -441,6 +525,9 @@ export async function getOptionsDesk(symbol = 'NIFTY') {
     pcr: analytics.pcr, maxPain: analytics.maxPain,
     ivPercentile: analytics.ivPercentile, oiSkew: analytics.oiSkew,
   } : null;
+  const liveChain = outChain.source === 'nse' || outChain.source === 'bse';
+  const chainFetchedAt = Number(outChain.fetchedAt) || null;
+  const chainAgeMs = liveChain && chainFetchedAt ? Math.max(0, Date.now() - chainFetchedAt) : null;
 
   return {
     ok: true,
@@ -458,6 +545,27 @@ export async function getOptionsDesk(symbol = 'NIFTY') {
     lotSize: outChain.lotSize || LOT_SIZES[sym] || 1,
     analytics,
     optionsCtx,
+    // ---- v21.42 realtime / honesty metadata ----
+    venue: isBseIndex ? 'BSE' : 'NSE',
+    liveChain,
+    chainFetchedAt,
+    chainAgeMs,
+    chainFresh: Boolean(liveChain && chainAgeMs != null && chainAgeMs <= OPTION_CHAIN_FRESH_MS),
+    chainExpiries,
+    expiryRollPending,
+    liveSpot,
+    spotSource: chain
+      ? (outChain.via === 'groww' ? 'groww-live-chain' : 'exchange-live-chain')
+      : (liveSpot ? liveSpot.source : (quotes[sym] ? 'yahoo' : null)),
+    dataQuality: {
+      chainSource: outChain.source,
+      chainVia: outChain.via || null,
+      liveChain,
+      chainAgeMs,
+      chainFresh: Boolean(liveChain && chainAgeMs != null && chainAgeMs <= OPTION_CHAIN_FRESH_MS),
+      modelCap: liveChain ? null : MODEL_CHAIN_SCORE_CAP,
+      spotSource: chain ? (outChain.via === 'groww' ? 'groww-live-chain' : 'exchange-live-chain') : (liveSpot ? liveSpot.source : (quotes[sym] ? 'yahoo' : null)),
+    },
     // ATM ± 6 strikes for the UI table.
     rows: outChain.rows
       .filter(r => Math.abs(r.strike - (outChain.atmStrike ?? Math.round(spot / (STRIKE_STEPS[sym] || 50)) * (STRIKE_STEPS[sym] || 50))) <= (STRIKE_STEPS[sym] || 50) * 6)
@@ -959,8 +1067,11 @@ export function buildOrderTicket(desk, strat, consensus, now = Date.now()) {
 //     on the NSE ₹0.05 tick.
 //   • every candidate carries an AI SCORE (0-100, transparent blend:
 //     35% index-consensus confidence + 20% POP-at-expiry + 15%
-//     reward:risk + 15% delta-fit (ATM ideal) + 15% grade).
-//     85+ ELITE · 75+ STRONG · 65+ ACTION · else WATCH.
+//     reward:risk + 15% delta-fit (ATM ideal) + 15% grade), then a
+//     ±10 chain-confluence adjustment (PCR/OI-lean/max-pain/GEX).
+//     85+ ELITE · 80+ STRONG · 65+ ACTION · else WATCH.
+//     v21.42: only a FRESH LIVE chain can reach STRONG/ELITE — model,
+//     stale and recent chains are capped below the strong bar.
 //   • the VIEW merges NIFTY+SENSEX and serves the TOP 4 cards by
 //     AI score (user spec: "top 4 cards show hone chahiye").
 //   • pro metrics per card: POP, breakeven, theta, per-lot cost/
@@ -1013,7 +1124,33 @@ export function buildOptionSignalCards(desk, deep) {
   if (cand.length === 0) return [];
 
   const grade = sig?.grade || 'NEUTRAL';
-  const gradeBonus = grade === 'STRONG' ? 100 : grade === 'ACTION' ? 70 : 40;
+  // v21.42 SUPER-INTELLIGENCE: the old ladder checked only STRONG/ACTION —
+  // an ELITE consensus fell through to the WATCH fallback (40), scoring
+  // WORSE than STRONG. Fixed + STRONG gets its own rung below ELITE.
+  const gradeBonus = grade === 'ELITE' ? 100 : grade === 'STRONG' ? 90 : grade === 'ACTION' ? 70 : 40;
+  // v21.42: ONE freshness truth for the card badge, the strong-signal gate
+  // and the score ceiling. Only a fresh LIVE chain can wear STRONG/ELITE.
+  const liveChain = desk.source === 'nse' || desk.source === 'bse';
+  const ageFromFetchedAt = Number.isFinite(Number(desk.chainFetchedAt))
+    ? Math.max(0, Date.now() - Number(desk.chainFetchedAt)) : null;
+  const chainAgeMs = liveChain
+    ? (Number.isFinite(Number(desk.chainAgeMs))
+      ? Math.max(0, Number(desk.chainAgeMs), ageFromFetchedAt ?? 0)
+      : ageFromFetchedAt)
+    : null;
+  const freshness = !liveChain ? 'model'
+    : chainAgeMs == null ? 'live-untimed'
+      : chainAgeMs <= OPTION_CHAIN_FRESH_MS ? 'live'
+        : chainAgeMs <= OPTION_CHAIN_STALE_MS ? 'recent'
+          : 'stale';
+  const chainFresh = freshness === 'live';
+  // recent = 45s–5m old; untimed live = no fetchedAt to prove freshness.
+  // Both stay below the 80 STRONG bar; model/stale stay below 75.
+  const scoreCap = freshness === 'live' ? 100 : freshness === 'recent' ? 79 : MODEL_CHAIN_SCORE_CAP;
+  // v21.42: deterministic chain-direction confluence (PCR / OI-lean /
+  // max-pain / gamma-flip) — the same tally the market-wide scan reads.
+  const confluence = chainConfluence(desk, side);
+  const venue = desk.venue || (symbol === 'SENSEX' ? 'BSE' : 'NSE');
   const cards = cand.map(({ row, bias, strike, ltp }) => {
     const ivPct = (type === 'CE' ? row.callIV : row.putIV) || null;
     const g = greeksFor(spot, strike, desk.expiry, ivPct, type);
@@ -1065,12 +1202,34 @@ export function buildOptionSignalCards(desk, deep) {
     // datacenter IPs by design), so its score carries an additional
     // haircut BEYOND the model-uncertainty handling. NIFTY's occasional
     // model mode is recoverable and carries no such discount.
-    const aiScoreRaw = Math.round(
-      0.35 * conf + 0.20 * (pop ?? 40) + 0.15 * rrScore + 0.15 * deltaFit + 0.15 * gradeBonus,
-    );
+    // v21.42: chain confluence is a signed adjustment (−10…+10), NOT a
+    // new weight — the existing blend stays auditable. The cap applies
+    // BEFORE the structural discount (aiScoreRaw stays identical for the
+    // same model card on either index) and again AFTER it.
+    const aiScoreBase = 0.35 * conf + 0.20 * (pop ?? 40) + 0.15 * rrScore + 0.15 * deltaFit + 0.15 * gradeBonus;
     const structuralDiscount = desk.source === SENSEX_MODEL_SOURCE ? sensexStructuralDiscount() : 0;
-    const aiScore = Math.max(0, Math.round(aiScoreRaw - structuralDiscount));
-    const tier = aiScore >= 85 ? 'ELITE' : aiScore >= 75 ? 'STRONG' : aiScore >= 65 ? 'ACTION' : 'WATCH';
+    const aiScoreRaw = Math.max(0, Math.min(100, Math.min(scoreCap, Math.round(aiScoreBase + confluence.score))));
+    const aiScore = Math.max(0, Math.min(scoreCap, aiScoreRaw - structuralDiscount));
+    // v21.42: the card ladder now matches superIntel (85 / 80 / 65 / 50)
+    // so the F&O strip and the Signal Board speak ONE tier language.
+    const tier = aiScore >= 85 ? 'ELITE' : aiScore >= 80 ? 'STRONG' : aiScore >= 65 ? 'ACTION' : 'WATCH';
+    const gradeTradeable = grade === 'ELITE' || grade === 'STRONG' || grade === 'ACTION';
+    // v21.42: "STRONG trade signal" is a REAL gate, not a badge: fresh
+    // live chain + STRONG/ELITE score + chain read not against the side
+    // + a tradeable consensus grade. Model/stale/recent chains can never
+    // produce one (score caps above), so this is belt-and-suspenders.
+    const strongSignal = chainFresh && gradeTradeable && !confluence.opposed
+      && (tier === 'ELITE' || tier === 'STRONG');
+    const chainNote = !liveChain
+      ? ' Model chain: OI/PCR/GEX confluence unavailable.'
+      : confluence.opposed
+        ? ` ⚠ Chain read (${confluence.direction}) is AGAINST this ${type} — score capped.`
+        : confluence.aligned
+          ? ` ✅ Chain read (${confluence.direction}) confirms this ${type} (+${confluence.score}).`
+          : ' Chain read neutral — no confluence bonus.';
+    const freshNote = freshness === 'live' ? ''
+      : freshness === 'recent' ? ' Chain 45s–5m old — STRONG badge locked.'
+        : freshness === 'stale' ? ' Chain >5m old — score capped.' : '';
 
     const expectedMovePct = plan ? r1(Math.abs((plan.target1 - spot) / spot) * 100) : null;
     const breakeven = r1(type === 'CE' ? strike + entry : strike - entry);
@@ -1098,6 +1257,21 @@ export function buildOptionSignalCards(desk, deep) {
       rr,
       // ---- v9.6 SUPERINTELLIGENCE pro layer ----
       aiScore, tier,
+      // v21.42: explicit strong CE/PE trade-signal classification + data
+      // provenance so the UI (and the auto-agent) never has to infer it.
+      strongSignal,
+      signalLabel: `${tier} ${type}`,
+      venue, liveChain, chainFresh, chainAgeMs, freshness,
+      scoreCap: scoreCap < 100 ? scoreCap : null,
+      chainConfluence: {
+        aligned: confluence.aligned,
+        opposed: confluence.opposed,
+        pts: confluence.pts,
+        direction: confluence.direction,
+        score: confluence.score,
+        checks: confluence.checks,
+        warnings: confluence.warnings,
+      },
       ...(structuralDiscount > 0 ? { aiScoreRaw, structuralDiscount } : {}),
       pop,
       breakeven,
@@ -1114,19 +1288,19 @@ export function buildOptionSignalCards(desk, deep) {
         side, confidence: sig?.confidence ?? null,
         grade, agreement: sig?.agreement ?? null,
       },
-      // v9.4 discipline kept, now AI-score aware: STRONG/ACTION grade
+      // v9.4 discipline kept, now AI-score aware: STRONG/ACTION/ELITE grade
       // YA 75+ AI score — the same bar the auto-agent fires on.
-      tradeable: grade === 'STRONG' || grade === 'ACTION' || aiScore >= 75,
+      tradeable: gradeTradeable || aiScore >= 75,
       basis: { target: basisT, stopLoss: basisS },
       indexLevels: plan ? {
         spot: r2(spot),
         target1: r2(plan.target1), stopLoss: r2(plan.stopLoss),
       } : { spot: r2(spot) },
       source: desk.source,        // 'nse' | 'bse' (live premiums) | 'bs-model-*' (honest model)
-      note: plan
+      note: (plan
         ? `Index plan se bana hai: ${symbol} ${r2(plan.target1)} pe premium target, ${r2(plan.stopLoss)} pe stop (BS re-price, IV/dte constant).${structuralDiscount > 0 ? ` SENSEX model-mode: AI score pe −${structuralDiscount} structural discount (no live-market cross-check possible).` : ''}`
-        : `Premium-based levels (index plan nahi mila): +30% target / −25% SL discipline.${structuralDiscount > 0 ? ` SENSEX model-mode: AI score pe −${structuralDiscount} structural discount (no live-market cross-check possible).` : ''}`,
-      machineNote: `🧠 AI ${aiScore}/100 (${tier}) — ${bias} strike · Δ ${g.delta != null ? g.delta.toFixed(2) : '—'} · POP ${pop != null ? `${pop}%` : '—'} · R:R ${rr != null ? `${rr}R` : '—'}${bias === 'OTM' ? ' · sasta par POP kam' : bias === 'ITM' ? ' · mehenga par POP zyada' : ' · peak liquidity + gamma'}${structuralDiscount > 0 ? ` · ⚠ SENSEX model-only (−${structuralDiscount} structural, ${SENSEX_MODEL_SOURCE})` : ''}.`,
+        : `Premium-based levels (index plan nahi mila): +30% target / −25% SL discipline.${structuralDiscount > 0 ? ` SENSEX model-mode: AI score pe −${structuralDiscount} structural discount (no live-market cross-check possible).` : ''}`) + chainNote + freshNote,
+      machineNote: `🧠 AI ${aiScore}/100 (${tier}) — ${bias} strike · Δ ${g.delta != null ? g.delta.toFixed(2) : '—'} · POP ${pop != null ? `${pop}%` : '—'} · R:R ${rr != null ? `${rr}R` : '—'}${bias === 'OTM' ? ' · sasta par POP kam' : bias === 'ITM' ? ' · mehenga par POP zyada' : ' · peak liquidity + gamma'}${strongSignal ? ` · 🔥 STRONG ${type} SIGNAL` : ''}${confluence.aligned ? ` · chain ${confluence.direction} confirms` : confluence.opposed ? ` · ⚠ chain ${confluence.direction} opposes` : liveChain ? ' · chain neutral' : ' · model chain'}${structuralDiscount > 0 ? ` · ⚠ SENSEX model-only (−${structuralDiscount} structural, ${SENSEX_MODEL_SOURCE})` : ''}.`,
     };
   });
 
@@ -1139,16 +1313,43 @@ export function buildOptionSignalCards(desk, deep) {
 // v9.6 — combined SUPERINTELLIGENCE view for the F&O SIGNAL CARDS
 // strip: one request computes NIFTY + SENSEX desks (each + its deep
 // consensus), builds the ranked candidates per index, then merges
-// and serves the TOP 4 cards by AI score (user spec), 30s cached.
-// Deep signals are imported lazily so the module graph stays
-// acyclic (signals.js → ensemble.js → here is already an edge for
-// OptionsFlow inputs).
+// and serves the TOP 4 cards by AI score (user spec).
+// v21.42: stale-while-revalidate — the deep ensemble can take ~15-20s
+// on a cold cache, so a stale-but-recent view is served INSTANTLY while
+// the next one computes in the background (polls never block on it).
+// Deep signals are imported lazily so the module graph stays acyclic
+// (signals.js → ensemble.js → here is already an edge for OptionsFlow
+// inputs).
 // ------------------------------------------------------------
 const _cardsCache = new Map();
+const _cardsInflight = new Map();
+function _cardsTtl() {
+  try { return isNseOpen() ? 20_000 : 60_000; } catch { return 30_000; }
+}
+function _refreshCardsView(deps, symbols, key) {
+  if (_cardsInflight.has(key)) return _cardsInflight.get(key);
+  const p = _buildCardsView(deps, symbols)
+    .then((data) => { _cardsCache.set(key, { at: Date.now(), data }); return data; })
+    .finally(() => { _cardsInflight.delete(key); });
+  _cardsInflight.set(key, p);
+  return p;
+}
 export async function getOptionSignalsView(deps, symbols = ['NIFTY', 'SENSEX']) {
   const key = symbols.join(',');
   const hit = _cardsCache.get(key);
-  if (hit && Date.now() - hit.at < 30_000) return hit.data;
+  const now = Date.now();
+  if (hit?.data) {
+    if (now - hit.at < _cardsTtl()) return hit.data;
+    if (now - hit.at < 5 * 60_000) {
+      _refreshCardsView(deps, symbols, key).catch(() => {});
+      return hit.data;
+    }
+  }
+  if (_cardsInflight.has(key)) return _cardsInflight.get(key);
+  return _refreshCardsView(deps, symbols, key);
+}
+
+async function _buildCardsView(deps, symbols) {
   const { getDeepSignal } = await import('./signals.js');
   const desks = await Promise.all((symbols || []).map(async (sym) => {
     try {
@@ -1167,6 +1368,11 @@ export async function getOptionSignalsView(deps, symbols = ['NIFTY', 'SENSEX']) 
         symbol: s, ok: true, spot: desk.spot, dte: desk.dte,
         expiry: desk.expiry, expiryLabel: expiryLabel(desk.expiry),
         lotSize: desk.lotSize, source: desk.source,
+        // v21.42 realtime provenance (mirrors the desk payload)
+        venue: desk.venue, sourceVia: desk.sourceVia || null,
+        liveChain: desk.liveChain, chainFresh: desk.chainFresh,
+        chainAgeMs: desk.chainAgeMs, chainFetchedAt: desk.chainFetchedAt,
+        expiryRollPending: desk.expiryRollPending,
         consensus,
         cards: buildOptionSignalCards(desk, deep),
         noCardReason: (!deep?.ok || deep.signal?.side === 'FLAT')
@@ -1181,14 +1387,23 @@ export async function getOptionSignalsView(deps, symbols = ['NIFTY', 'SENSEX']) 
   const all = [];
   for (const d of desks) if (d.ok && Array.isArray(d.cards)) all.push(...d.cards);
   all.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
+  const strong = all.filter(c => c.strongSignal);
   const data = {
     ok: true, asOf: Date.now(),
     topCount: 4,
     cards: all.slice(0, 4),
-    methodology: 'AI score = 35% index-consensus + 20% POP-at-expiry + 15% reward:risk + 15% delta-fit (ATM ideal) + 15% grade. Nifty50 + Sensex candidates (ATM/ITM/OTM) merged, TOP 4 served, har 30s re-ranked.',
+    // v21.42: explicit strong CE/PE signal summary for the strip badge +
+    // the auto-agent's operator view. Model/stale chains never enter here.
+    strongCount: strong.length,
+    strongSignals: strong.slice(0, 4).map(c => ({
+      name: c.name, symbol: c.symbol, type: c.type, direction: c.direction,
+      venue: c.venue, aiScore: c.aiScore, tier: c.tier,
+      entry: c.entry, target: c.target, stopLoss: c.stopLoss,
+      chainAgeMs: c.chainAgeMs, expiry: c.expiry,
+    })),
+    methodology: 'AI score = 35% index-consensus + 20% POP-at-expiry + 15% reward:risk + 15% delta-fit (ATM ideal) + 15% grade, then ±10 chain-confluence (PCR/OI-lean/max-pain/GEX). STRONG/ELITE requires a fresh live NSE/BSE chain. Nifty50 + Sensex candidates (ATM/ITM/OTM) merged, TOP 4 served; in-session the view refreshes ~20s (stale-while-revalidate — polls stay instant).',
     desks,
   };
-  _cardsCache.set(key, { at: Date.now(), data });
   return data;
 }
 

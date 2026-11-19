@@ -541,6 +541,16 @@ const NSE_COOKIE_TTL = 8 * 60 * 1000;
 // in one payload).
 const NSE_DIRECT_NEG_MS = 10 * 60 * 1000;
 let _nseDirectNegUntil = 0;
+// v21.42 OPTIONS REALTIME: the NSE-direct feed used to run uncached — every
+// desk/scan call repeated the cookie bootstrap + chain request. With the
+// Groww mirror already serving 30s-fresh chains in-session, a 15s direct
+// cache keeps repeated desk polls instant without changing data honesty
+// (fetchedAt stays the real upstream fetch time). Off-session the chain
+// barely moves, so a 2-minute window is enough.
+const NSE_CHAIN_CACHE_SESSION_MS = 15 * 1000;
+const NSE_CHAIN_CACHE_OFF_MS = 2 * 60 * 1000;
+const _nseChainCache = new Map();      // sym -> { at, chain }
+const _nseChainInflight = new Map();   // sym -> Promise<chain|null>
 
 export function __nseNegForTests() { return { directNegUntil: _nseDirectNegUntil }; }
 
@@ -603,7 +613,28 @@ export function _expiryNormISO(s) {
  * this boundary — the desk, Greeks, GEX and paper trades can keep
  * their all-ISO contract.
  */
-export async function fetchNSEOptionChain(symbol) {
+export async function fetchNSEOptionChain(symbol, opts = {}) {
+  const sym = String(symbol || 'NIFTY').toUpperCase();
+  const expiry = /^\d{4}-\d{2}-\d{2}$/.test(String(opts?.expiry || '')) ? String(opts.expiry) : null;
+  const key = expiry ? `${sym}|${expiry}` : sym;
+  const ttl = (() => {
+    try { return isNseOpen() ? NSE_CHAIN_CACHE_SESSION_MS : NSE_CHAIN_CACHE_OFF_MS; }
+    catch { return NSE_CHAIN_CACHE_SESSION_MS; }
+  })();
+  const hit = _nseChainCache.get(key);
+  if (hit?.chain && Date.now() - hit.at < ttl) return hit.chain;
+  if (_nseChainInflight.has(key)) return _nseChainInflight.get(key);
+  const p = _fetchNSEOptionChainFresh(sym, expiry)
+    .then((chain) => {
+      if (chain) _nseChainCache.set(key, { at: Date.now(), chain });
+      return chain;
+    })
+    .finally(() => { _nseChainInflight.delete(key); });
+  _nseChainInflight.set(key, p);
+  return p;
+}
+
+async function _fetchNSEOptionChainFresh(symbol, expiry = null) {
   const sym = String(symbol || 'NIFTY').toUpperCase();
   const path = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(sym)
     ? `/api/option-chain-indices?symbol=${encodeURIComponent(sym)}`
@@ -668,7 +699,7 @@ export async function fetchNSEOptionChain(symbol) {
   // datacenter-friendly). NIFTY only — the other index pages on groww
   // are client-side rendered and carry no chain data in the HTML.
   if (sym === 'NIFTY') {
-    const mirror = await fetchGrowwIndexChain('NIFTY').catch(() => null);
+    const mirror = await fetchGrowwIndexChain('NIFTY', expiry).catch(() => null);
     if (mirror) return mirror;
   }
   return null;
@@ -741,9 +772,10 @@ function _bseExpiryNorm(s) {
  * Returns null when BOTH paths fail (the documented datacenter case) —
  * callers MUST label the fallback honestly (bs-model-sensex-always).
  */
-export async function fetchBSEOptionChain(symbol = 'SENSEX') {
+export async function fetchBSEOptionChain(symbol = 'SENSEX', opts = {}) {
   const sym = String(symbol || 'SENSEX').toUpperCase();
   if (sym !== 'SENSEX') return null; // only the BSE flagship index is wired
+  const expiry = /^\d{4}-\d{2}-\d{2}$/.test(String(opts?.expiry || '')) ? String(opts.expiry) : null;
   // Step 1 — Groww public mirror FIRST (verified-reachable REAL chain).
   // v21.0.6 [audit]: mirror ka APNA 5-min negative backoff usse govern
   // karta hai — whole-ladder 10-min hold ab SIRF direct-BSE probes ko
@@ -751,7 +783,7 @@ export async function fetchBSEOptionChain(symbol = 'SENSEX') {
   // tha jabki mirror apne 5-min backoff ke baad recover ho sakta tha
   // (har outage pe 5 min extra model-chain SENSEX). Mirror success
   // kisi bhi stale hold ko clear kar deta hai.
-  const mirror = await fetchGrowwIndexChain('SENSEX').catch(() => null);
+  const mirror = await fetchGrowwIndexChain('SENSEX', expiry).catch(() => null);
   if (mirror) { _bseNegUntil = 0; return mirror; }
   if (Date.now() < _bseNegUntil) return null; // hold governs DIRECT probes only
   // Step 2 — direct BSE (two candidate endpoints, community-known
@@ -820,7 +852,11 @@ export async function fetchBSEOptionChain(symbol = 'SENSEX') {
 }
 
 export function __bseNegForTests() { return { negUntil: _bseNegUntil, cookie: _bseCookie }; }
-export function __resetBseForTests() { _bseNegUntil = 0; _bseCookie = null; _bseCookieAt = 0; _growwChainState.clear(); _nseDirectNegUntil = 0; }
+export function __resetBseForTests() {
+  _bseNegUntil = 0; _bseCookie = null; _bseCookieAt = 0;
+  _growwChainState.clear(); _growwInflight.clear();
+  _nseDirectNegUntil = 0; _nseChainCache.clear(); _nseChainInflight.clear();
+}
 
 // ---------------- Groww public index-chain mirrors (v21.0.4/v21.0.5) ----------------
 // See the BSE research-spike note above. groww.in server-renders the
@@ -846,7 +882,13 @@ const GROWW_INDEX_PAGES = {
 // lot-size field nahi deta; Groww mirror real lot deta hai). optionsDesk.js ke
 // LOT_SIZES ke saath sync me rakhna hai.
 const NSE_STATIC_LOT_SIZES = { NIFTY: 75, BANKNIFTY: 35, FINNIFTY: 65, MIDCPNIFTY: 140, NIFTYNXT50: 25 };
-const GROWW_CHAIN_TTL = 90 * 1000;      // re-fetch at most every 90s
+const GROWW_CHAIN_TTL_SESSION = 30 * 1000; // v21.42: 90s → 30s in-session (live premiums near-real-time)
+const GROWW_CHAIN_TTL_OFF = 5 * 60 * 1000; // closed market: the chain barely moves
+const GROWW_STALE_MAX_MS = 10 * 60 * 1000; // serve last live chain through a short outage, age-tagged
+function growwChainTtl() {
+  try { return isNseOpen() ? GROWW_CHAIN_TTL_SESSION : GROWW_CHAIN_TTL_OFF; }
+  catch { return GROWW_CHAIN_TTL_SESSION; }
+}
 // v21.7.0 (Issue-1): 5 min → 90s — NSE-direct 403 hone par Groww mirror
 // hi live premiums ka source hai; ek transient blip (timeout/CDN hiccup)
 // poore 5 min tak NIFTY/SENSEX cards ko BS-model premiums par dhakel
@@ -945,33 +987,54 @@ export function _growwParseNextData(next, meta = {}) {
 }
 
 /** Fetch the REAL index chain via groww's public page (SENSEX→bse,
- *  NIFTY→nse). 90s cache + 5-min negative backoff, per index. */
-async function fetchGrowwIndexChain(index) {
-  const url = GROWW_INDEX_PAGES[index];
-  if (!url) return null;
-  const st = _growwSt(index);
-  if (Date.now() < st.negUntil) return null;
-  if (st.chain && Date.now() - st.at < GROWW_CHAIN_TTL) return st.chain;
-  try {
-    const r = await fetch(url, { headers: GROWW_HEADERS, signal: AbortSignal.timeout(12000) });
-    if (!r.ok) throw new Error('groww HTTP ' + r.status);
-    const html = await r.text();
-    const i = html.indexOf('<script id="__NEXT_DATA__"');
-    if (i < 0) throw new Error('groww page has no __NEXT_DATA__');
-    const s = html.indexOf('>', i) + 1;
-    const e = html.indexOf('</script>', s);
-    if (e < 0) throw new Error('groww __NEXT_DATA__ truncated');
-    const chain = _growwParseNextData(JSON.parse(html.slice(s, e)), {
-      symbol: index,
-      source: index === 'SENSEX' ? 'bse' : 'nse',
-    });
-    if (!chain) throw new Error('groww chain failed sanity checks');
-    st.chain = chain; st.at = Date.now(); st.negUntil = 0;
-    return chain;
-  } catch {
-    st.negUntil = Date.now() + GROWW_NEG_MS; // short hold — mirror usually recovers
-    return null;
+ *  NIFTY→nse). v21.42 REALTIME: 30s in-session / 5min off-session cache,
+ *  single-flight, stale-while-error, and an optional ?expiry=YYYY-MM-DD
+ *  (the page server-renders the requested expiry's contracts — the
+ *  expiry-day-evening roll no longer has to fall back to a model chain). */
+const _growwInflight = new Map();
+async function fetchGrowwIndexChain(index, expiry) {
+  const base = GROWW_INDEX_PAGES[index];
+  if (!base) return null;
+  const exp = /^\d{4}-\d{2}-\d{2}$/.test(String(expiry || '')) ? String(expiry) : null;
+  const key = exp ? `${index}|${exp}` : index;
+  const url = exp ? `${base}?expiry=${encodeURIComponent(exp)}` : base;
+  const st = _growwSt(key);
+  const now = Date.now();
+  // 1) Fresh cache always wins — even during a negative hold.
+  if (st.chain && now - st.at < growwChainTtl()) return st.chain;
+  // 2) Negative hold gates NEW upstream probes only. A recent live chain
+  //    keeps serving (with its real fetchedAt) through a short outage.
+  if (now < st.negUntil) {
+    return (st.chain && now - st.at < GROWW_STALE_MAX_MS) ? st.chain : null;
   }
+  // 3) One in-flight HTML fetch per index+expiry (concurrent polls ride it).
+  if (_growwInflight.has(key)) return _growwInflight.get(key);
+  const p = (async () => {
+    try {
+      const r = await fetch(url, { headers: GROWW_HEADERS, signal: AbortSignal.timeout(12000) });
+      if (!r.ok) throw new Error('groww HTTP ' + r.status);
+      const html = await r.text();
+      const i = html.indexOf('<script id="__NEXT_DATA__"');
+      if (i < 0) throw new Error('groww page has no __NEXT_DATA__');
+      const s = html.indexOf('>', i) + 1;
+      const e = html.indexOf('</script>', s);
+      if (e < 0) throw new Error('groww __NEXT_DATA__ truncated');
+      const chain = _growwParseNextData(JSON.parse(html.slice(s, e)), {
+        symbol: index,
+        source: index === 'SENSEX' ? 'bse' : 'nse',
+      });
+      if (!chain) throw new Error('groww chain failed sanity checks');
+      st.chain = chain; st.at = Date.now(); st.negUntil = 0;
+      return chain;
+    } catch {
+      st.negUntil = Date.now() + GROWW_NEG_MS; // short hold — mirror usually recovers
+      // Stale-while-error: a recent real chain beats a model chain. Its
+      // fetchedAt keeps the staleness honest for cards/scan consumers.
+      return (st.chain && Date.now() - st.at < GROWW_STALE_MAX_MS) ? st.chain : null;
+    }
+  })().finally(() => { _growwInflight.delete(key); });
+  _growwInflight.set(key, p);
+  return p;
 }
 
 // ---------------- time / market-hours (IST) ----------------

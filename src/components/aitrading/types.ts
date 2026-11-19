@@ -770,6 +770,27 @@ export interface OptionSignalCard {
   /** v9.6 superintelligence layer — AI score 0-100 + tier + pro metrics */
   aiScore?: number | null;
   tier?: 'ELITE' | 'STRONG' | 'ACTION' | 'WATCH' | string | null;
+  /** v21.42: a REAL strong CE/PE trade signal — fresh live chain + STRONG/
+   *  ELITE score + chain read not against the side + tradeable grade. */
+  strongSignal?: boolean;
+  signalLabel?: string;
+  venue?: 'NSE' | 'BSE' | string;
+  liveChain?: boolean;
+  chainFresh?: boolean;
+  chainAgeMs?: number | null;
+  freshness?: 'live' | 'recent' | 'stale' | 'model' | 'live-untimed' | string;
+  /** Score ceiling applied for model/recent/stale chains (null = no cap). */
+  scoreCap?: number | null;
+  /** v21.42: deterministic PCR/OI-lean/max-pain/GEX confluence read. */
+  chainConfluence?: {
+    aligned: boolean;
+    opposed: boolean;
+    pts: number;
+    direction: string;
+    score: number;
+    checks?: string[];
+    warnings?: string[];
+  } | null;
   pop?: number | null;
   breakeven?: number | null;
   expectedMovePct?: number | null;
@@ -804,6 +825,22 @@ export interface OptionSignalsView {
   /** v9.6 — the merged TOP-4 cards by AI score (Nifty50 + Sensex). */
   cards?: OptionSignalCard[];
   topCount?: number;
+  /** v21.42: explicit strong CE/PE signal summary (fresh live chains only). */
+  strongCount?: number;
+  strongSignals?: Array<{
+    name: string;
+    symbol: string;
+    type: 'CE' | 'PE';
+    direction: 'LONG' | 'SHORT';
+    venue?: string;
+    aiScore?: number | null;
+    tier?: string | null;
+    entry: number;
+    target: number;
+    stopLoss: number;
+    chainAgeMs?: number | null;
+    expiry?: string;
+  }>;
   methodology?: string | null;
   desks: Array<{
     symbol: string;
@@ -815,6 +852,13 @@ export interface OptionSignalsView {
     expiryLabel?: string | null;
     lotSize?: number;
     source?: OptionSource;
+    venue?: string;
+    sourceVia?: string | null;
+    liveChain?: boolean;
+    chainFresh?: boolean;
+    chainAgeMs?: number | null;
+    chainFetchedAt?: number | null;
+    expiryRollPending?: boolean;
     consensus?: { side: string; confidence: number; grade: string };
     cards: OptionSignalCard[];
     noCardReason?: string | null;
@@ -886,6 +930,31 @@ export interface OptionsDesk {
   /** v21.0.4: which live relay served the chain ('groww' public mirror
    *  vs a direct exchange fetch) — null for synthetic/model chains. */
   sourceVia?: string | null;
+  /** v21.42: realtime provenance + freshness (NSE/BSE venue, chain age). */
+  venue?: 'NSE' | 'BSE' | string;
+  liveChain?: boolean;
+  chainFetchedAt?: number | null;
+  chainAgeMs?: number | null;
+  chainFresh?: boolean;
+  chainExpiries?: string[];
+  expiryRollPending?: boolean;
+  liveSpot?: {
+    price: number;
+    source: string;
+    ageMs: number;
+    fresh: boolean;
+    deltaPct: number | null;
+  } | null;
+  spotSource?: string | null;
+  dataQuality?: {
+    chainSource: OptionSource;
+    chainVia: string | null;
+    liveChain: boolean;
+    chainAgeMs: number | null;
+    chainFresh: boolean;
+    modelCap: number | null;
+    spotSource: string | null;
+  } | null;
   syntheticNote?: string | null;
   lotSize: number;
   analytics: {

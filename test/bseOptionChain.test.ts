@@ -424,6 +424,12 @@ describe('v21.0.5 NIFTY Groww mirror ladder — fetchNSEOptionChain', () => {
 // server-rejected on the ISO regex. This locks the source normalization.
 // ============================================================
 describe('fetchNSEOptionChain (real module, stubbed fetch) — v21.0.3 expiry ISO normalization', () => {
+  afterEach(async () => {
+    // v21.42: the direct/mirror chain now has a short TTL cache — never
+    // leak a stubbed chain into the next test.
+    const real: any = await vi.importActual('../server/ai/data.js');
+    real.__resetBseForTests();
+  });
   const mkDmy = (iso: string) => {
     const MONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const [y, m, d] = iso.split('-');

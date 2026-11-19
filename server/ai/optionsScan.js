@@ -26,6 +26,11 @@
 // 350ms gap between groups — never a stampede.
 // ============================================================
 import { getOptionsDesk, expiryLabel } from './optionsDesk.js';
+import { directionRead } from './optionsFlow.js';
+// v21.42: the deterministic chain read lives in optionsFlow.js (ONE truth
+// shared by the signal-card confluence layer and this scan). Re-exported
+// here so existing scan consumers/tests keep their import path.
+export { directionRead };
 import { discoverNSEFullUniverse } from './indiaUniverse.js';
 
 const INDEX_UNDERLYINGS = ['NIFTY', 'SENSEX', 'BANKNIFTY'];
@@ -45,7 +50,6 @@ const GROUP_GAP_MS = 350;
 const CACHE_MS = 90 * 1000;
 
 const r1 = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
-const r2 = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 
 // ---------------- PURE core (test-locked) ----------------
 
@@ -66,41 +70,10 @@ export function pickStockUnderlyings(discoveredRows, n = DEFAULT_STOCKS) {
 }
 
 /**
- * PURE: deterministic direction read off the desk analytics.
- * Returns { pts, direction, why } — pts is a signed conviction tally:
- *   +1 puts being written (support)   · −1 calls being written (cap)
- *   +1 PCR > 1.2 (put-heavy = support floor) · −1 PCR < 0.7 (call chase)
- *   +1 spot above max-pain · −1 below
- *   +1 spot above gamma flip (positive-gamma zone) · −1 below
+ * v21.42: directionRead moved to optionsDesk.js and is imported/re-exported
+ * above — the signal-card confluence layer and the market-wide scan must
+ * read the EXACT same tally (no duplicate engine).
  */
-export function directionRead(desk) {
-  const a = desk?.analytics || {};
-  const pts = [];
-  const oiLean = a.flow?.oiLean;
-  if (typeof oiLean === 'number' && Number.isFinite(oiLean)) {
-    if (oiLean <= -0.15) pts.push(['PE writing — support ban raha hai', 1]);
-    else if (oiLean >= 0.15) pts.push(['CE writing — upar cap lag raha hai', -1]);
-  }
-  const pcr = a.pcr;
-  if (typeof pcr === 'number' && Number.isFinite(pcr)) {
-    if (pcr >= 1.2) pts.push(['PCR ' + r2(pcr) + ' — put-heavy book (support floor)', 1]);
-    else if (pcr <= 0.7) pts.push(['PCR ' + r2(pcr) + ' — call-heavy book (top pressure)', -1]);
-  }
-  if (typeof a.maxPain === 'number' && desk?.spot > 0 && a.maxPain > 0) {
-    const off = (desk.spot - a.maxPain) / a.maxPain;
-    if (off >= 0.005) pts.push(['spot max-pain ke upar — writers ko upar khinchne ka motive', 1]);
-    else if (off <= -0.005) pts.push(['spot max-pain ke neeche — writers ko neeche khinchne ka motive', -1]);
-  }
-  const flip = a.gex?.gammaFlip;
-  if (typeof flip === 'number' && desk?.spot > 0 && flip > 0) {
-    const off = (desk.spot - flip) / flip;
-    if (off >= 0.002) pts.push(['positive-GEX zone (gamma flip ke upar) — dealers move damp karte hain', 1]);
-    else if (off <= -0.002) pts.push(['negative-GEX zone (gamma flip ke neeche) — move accelerate ho sakta hai', -1]);
-  }
-  const total = pts.reduce((s, [, v]) => s + v, 0);
-  const direction = total >= 2 ? 'BULLISH' : total <= -2 ? 'BEARISH' : 'NEUTRAL';
-  return { pts: total, direction, why: pts.map(([w]) => w) };
-}
 
 /**
  * PURE: transparent scan score (0-100-ish, ranking only).

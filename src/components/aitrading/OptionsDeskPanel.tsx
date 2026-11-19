@@ -56,12 +56,19 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
       : c.source === 'bs-model-sensex-always'
         ? 'Live sources unreachable: BSE direct + Groww mirror dono is server se blocked — Black-Scholes model estimates. Auto-retry chalu rehta hai; live prices ke liye apna broker cross-check karo.'
         : 'NSE chain temporarily blocked from this server — Black-Scholes model premiums (IV anchored to India VIX). Recoverable: next successful NSE fetch restores live data.';
-  // v9.6 superintelligence tier styling (AI score 85+ ELITE · 75+ STRONG · 65+ ACTION)
+  // v9.6 superintelligence tier styling (AI score 85+ ELITE · 80+ STRONG · 65+ ACTION)
   const tier = (c.tier as string) || 'WATCH';
   const tierCls = tier === 'ELITE' ? 'bg-violet-500/15 text-violet-300 border-violet-500/40'
     : tier === 'STRONG' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
     : tier === 'ACTION' ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40'
     : 'bg-slate-600/20 text-slate-400 border-slate-600/40';
+  // v21.42: live-chain age + freshness chip (NSE/BSE realtime provenance).
+  const chainAgeText = c.chainAgeMs == null ? 'age n/a'
+    : c.chainAgeMs < 60_000 ? `${Math.max(1, Math.round(c.chainAgeMs / 1000))}s`
+      : `${Math.round(c.chainAgeMs / 60_000)}m`;
+  const freshCls = c.freshness === 'live' ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
+    : c.freshness === 'recent' ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+      : 'bg-rose-500/10 text-rose-300 border-rose-500/30';
   // v9.5 F&O PAPER: one-click option paper trade (1 lot) from the card.
   const [paperBusy, setPaperBusy] = useState(false);
   const [paperMsg, setPaperMsg] = useState<string | null>(null);
@@ -92,8 +99,14 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
         <span className="text-[9px] font-black text-slate-500 tracking-wider">🎯 F&amp;O SIGNAL CARD</span>
         {c.aiScore != null && (
           <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${tierCls}`}
-            title="AI score = 35% index-consensus + 20% POP-at-expiry + 15% reward:risk + 15% delta-fit (ATM ideal) + 15% grade">
+            title="AI score = 35% index-consensus + 20% POP-at-expiry + 15% reward:risk + 15% delta-fit (ATM ideal) + 15% grade, then ±10 chain-confluence (PCR/OI-lean/max-pain/GEX)">
             🧠 AI {c.aiScore} · {tier}
+          </span>
+        )}
+        {c.strongSignal && (
+          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border animate-pulse ${c.type === 'CE' ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/50' : 'bg-red-500/20 text-red-200 border-red-400/50'}`}
+            title={`Strong ${c.type} trade signal — fresh ${c.venue || 'exchange'} chain + ${c.tier} AI score + chain read not against the side`}>
+            🔥 STRONG {c.type} SIGNAL
           </span>
         )}
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${bull ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-red-500/15 text-red-300 border-red-500/30'}`}>
@@ -102,6 +115,12 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${srcCls}`} title={srcTitle}>
           {srcLabel}
         </span>
+        {c.liveChain && (
+          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${freshCls}`}
+            title={`${c.venue || 'Exchange'} chain fetched ${chainAgeText} ago${c.source === 'bse' || c.source === 'nse' ? '' : ' (model)'} — STRONG badge ke liye chain ≤45s fresh honi chahiye`}>
+            ⛓ {c.venue || 'LIVE'} {chainAgeText} {c.chainFresh ? '· FRESH' : c.freshness === 'recent' ? '· RECENT' : '· STALE'}
+          </span>
+        )}
         {c.dte != null && (
           <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${c.dte <= 1 ? 'bg-red-500/10 text-red-300 border-red-500/30' : 'bg-slate-600/20 text-slate-300 border-slate-600/30'}`}>
             {c.dte === 0 ? 'AAJ EXPIRY ⚠️' : `${c.dte} din baaki`}
@@ -141,7 +160,7 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
         </div>
         {c.tradeable === false && (
           <div className="mt-2.5 rounded-lg bg-amber-500/[0.07] border border-amber-500/25 px-2.5 py-1.5 text-[9px] text-amber-200/90 leading-relaxed">
-            ⚠️ Grade <b>{c.consensus?.grade || 'NEUTRAL'}</b> + AI score <b>{c.aiScore ?? '—'}</b> — ye WATCHLIST card hai. Entry MAT karo jab tak 75+ AI score ya ACTION/STRONG grade na ho (cards har 60s me auto-update hoti hain).
+            ⚠️ Grade <b>{c.consensus?.grade || 'NEUTRAL'}</b> + AI score <b>{c.aiScore ?? '—'}</b> — ye WATCHLIST card hai. Entry MAT karo jab tak ACTION/STRONG/ELITE grade ya 75+ AI score na ho (cards har 15s me auto-update hoti hain).
           </div>
         )}
       </div>
@@ -150,7 +169,7 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
       {c.aiScore != null && (
         <div className="mt-2 flex items-center gap-2">
           <div className="flex-1 h-1.5 rounded-full bg-black/40 overflow-hidden" role="img" aria-label={`AI score ${c.aiScore} of 100`}>
-            <div className={`h-full rounded-full ${c.aiScore >= 85 ? 'bg-violet-400/80' : c.aiScore >= 75 ? 'bg-emerald-400/80' : c.aiScore >= 65 ? 'bg-cyan-400/70' : 'bg-slate-500/60'}`} style={{ width: `${Math.max(4, Math.min(100, c.aiScore))}%` }} />
+            <div className={`h-full rounded-full ${c.aiScore >= 85 ? 'bg-violet-400/80' : c.aiScore >= 80 ? 'bg-emerald-400/80' : c.aiScore >= 65 ? 'bg-cyan-400/70' : 'bg-slate-500/60'}`} style={{ width: `${Math.max(4, Math.min(100, c.aiScore))}%` }} />
           </div>
           <span className="text-[8px] font-mono font-black text-slate-500 shrink-0">AI {c.aiScore}/100</span>
         </div>
@@ -215,6 +234,12 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
       {c.indexLevels && c.indexLevels.target1 != null && (
         <div className="mt-1.5 text-[9px] font-mono text-slate-500 leading-relaxed">
           📐 index plan: spot {c.indexLevels.spot?.toLocaleString('en-IN')} → target {c.indexLevels.target1?.toLocaleString('en-IN')} / SL {c.indexLevels.stopLoss?.toLocaleString('en-IN')} · premium = option re-priced in BS at those levels
+        </div>
+      )}
+      {c.chainConfluence && c.liveChain && (
+        <div className={`mt-1.5 rounded-lg px-2.5 py-1.5 text-[9px] font-mono leading-relaxed border ${c.chainConfluence.opposed ? 'bg-rose-500/[0.07] border-rose-500/25 text-rose-200/90' : c.chainConfluence.aligned ? 'bg-emerald-500/[0.07] border-emerald-500/25 text-emerald-200/90' : 'bg-slate-700/20 border-slate-600/25 text-slate-400'}`}>
+          ⛓ Chain confluence: {c.chainConfluence.direction} ({c.chainConfluence.pts > 0 ? '+' : ''}{c.chainConfluence.pts}) · {c.chainConfluence.aligned ? `✅ ${c.type} ke saath` : c.chainConfluence.opposed ? `⚠ ${c.type} ke against — score capped` : 'neutral'}
+          {c.chainConfluence.checks?.length ? ` · ${c.chainConfluence.checks.slice(0, 2).join(' · ')}` : ''}
         </div>
       )}
 
@@ -291,13 +316,12 @@ function OptionSignalCardsStrip({ onOpened }: { onOpened?: (msg: string, ok: boo
       else if (!viewRef.current) setErr(true);
     };
     run(true);
-    // v9.7: 30s poll — the strip label ("30s re-rank") aur the server's
-    // 30s cards cache dono se aligned (pehle 60s poll chal raha tha,
-    // label jhooth bolta tha).
+    // v21.42: 15s poll — the server serves a 20s-cached strip and refreshes
+    // it stale-while-revalidate, so polls never block on the deep ensemble.
     // v10.18: hidden tabs skip the poll (every sibling poller gates on
     // document.hidden — a backgrounded options tab no longer burns a
-    // 12s-timeout API call every 30s).
-    const iv = setInterval(() => { if (!document.hidden) run(false); setAgeTick(t => t + 1); }, 30_000);
+    // 12s-timeout API call every 15s).
+    const iv = setInterval(() => { if (!document.hidden) run(false); setAgeTick(t => t + 1); }, 15_000);
     // v21.7.0 (Issue-1): TAB WAPAS KHOLTE HI FORCE-FRESH — pura hidden
     // session ke baad wapas aane par pehli paint ≤30s purani cache se hoti
     // thi. visibilitychange par turant fresh fetch ("site open tak fresh
@@ -352,7 +376,13 @@ function OptionSignalCardsStrip({ onOpened }: { onOpened?: (msg: string, ok: boo
           if (ageMin < 3) return <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-amber-500/15 text-amber-300 border border-amber-400/30">● {ageMin}m purana</span>;
           return <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-red-500/15 text-red-300 border border-red-400/30">● STALE {ageMin}m — retry chalu</span>;
         })() : null}
-        <span className="text-[9px] text-slate-500 font-mono">Nifty50 + Sensex · AI-scored TOP 4 (ATM/ITM/OTM candidates) · premium Entry/Target/SL · 30s re-rank</span>
+        {view?.strongCount ? (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-emerald-500/20 text-emerald-200 border border-emerald-400/40 animate-pulse"
+            title="Fresh live NSE/BSE chain + STRONG/ELITE AI score + chain read not against the side">
+            🔥 {view.strongCount} STRONG {[...new Set((view.strongSignals || []).map(s => s.type))].join('/')} SIGNAL{view.strongCount > 1 ? 'S' : ''}
+          </span>
+        ) : null}
+        <span className="text-[9px] text-slate-500 font-mono">Nifty50 + Sensex · AI-scored TOP 4 (ATM/ITM/OTM candidates) · premium Entry/Target/SL · 15s poll · 20s re-rank</span>
         {/* v21.0.2 OPTIONS AUTO-ENTRY toggle — NIFTY/SENSEX tradeable cards
             se paper auto-entry (server loop optionsAutoEntry.js, default OFF). */}
         <button onClick={toggleAuto} disabled={autoBusy}
@@ -812,6 +842,12 @@ export const OptionsDeskPanel = memo(function OptionsDeskPanel({ onPaperOpened }
               ? `Real ${desk.source === 'nse' ? 'NSE NIFTY' : 'BSE SENSEX'} chain — Groww public page se relay (live LTP / OI / IV)`
               : desk.source === 'bse' ? 'Real BSE option chain (direct)' : desk.source === 'nse' ? 'Real NSE option chain (direct)' : undefined}>
             {desk.source === 'nse' ? (desk.sourceVia === 'groww' ? 'LIVE NSE CHAIN · GROWW' : 'LIVE NSE CHAIN') : desk.source === 'bse' ? (desk.sourceVia === 'groww' ? 'LIVE BSE CHAIN · GROWW' : 'LIVE BSE CHAIN') : desk.source === 'bs-model-sensex-always' ? 'SENSEX MODEL CHAIN — NO LIVE FEED' : 'BS MODEL CHAIN — NSE BLOCKED'}
+          </span>
+        )}
+        {!scanMode && desk?.liveChain && (
+          <span className={`px-2 py-1 rounded-lg text-[10px] font-black border ${desk.chainFresh ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25' : 'bg-amber-500/10 text-amber-300 border-amber-500/30'}`}
+            title={`${desk.venue || 'Exchange'} chain fetched ${desk.chainAgeMs != null ? `${Math.max(1, Math.round(desk.chainAgeMs / 1000))}s` : '?'} ago${desk.sourceVia === 'groww' ? ' via Groww public mirror' : ' direct from the exchange'}`}>
+            ⛓ {desk.venue || 'LIVE'} {desk.chainAgeMs != null ? (desk.chainAgeMs < 60_000 ? `${Math.max(1, Math.round(desk.chainAgeMs / 1000))}s` : `${Math.round(desk.chainAgeMs / 60_000)}m`) : ''} {desk.chainFresh ? '· FRESH' : '· DELAYED'}
           </span>
         )}
         {!scanMode && desk?.consensus && (
