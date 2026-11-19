@@ -18,7 +18,7 @@
 //      Greeks and lot sizes.
 // ============================================================
 import { fetchNSEOptionChain, fetchBSEOptionChain, fetchYahooQuotes, isNseOpen } from './data.js';
-import { chainConfluence } from './optionsFlow.js';
+import { chainConfluence, optionTier } from './optionsFlow.js';
 import { bsPrice, bsGreeks, impliedVol as _impliedVol, yearsToExpiry, nextWeeklyExpiry, normCdf } from './lib/blackScholes.js';
 import { aggregateVotes as _aggregateVotes } from './ensemble.js';
 import { sessionPhase } from './probrain.js';
@@ -1086,6 +1086,7 @@ export function buildOptionSignalCards(desk, deep) {
   const symbol = desk.symbol;
   const type = side === 'LONG' ? 'CE' : 'PE';
   const spot = desk.spot;
+  const chainAnalytics = desk.analytics || null;
   const rows = Array.isArray(desk.rows) ? desk.rows : [];
   if (rows.length === 0) return [];
   const T = yearsToExpiry(`${desk.expiry}T15:30:00+05:30`);
@@ -1212,7 +1213,9 @@ export function buildOptionSignalCards(desk, deep) {
     const aiScore = Math.max(0, Math.min(scoreCap, aiScoreRaw - structuralDiscount));
     // v21.42: the card ladder now matches superIntel (85 / 80 / 65 / 50)
     // so the F&O strip and the Signal Board speak ONE tier language.
-    const tier = aiScore >= 85 ? 'ELITE' : aiScore >= 80 ? 'STRONG' : aiScore >= 65 ? 'ACTION' : 'WATCH';
+    // v21.43: optionTier() is the single shared ladder (FreeLLMAPI confirm
+    // layer recomputes the same way after its ± score adjustment).
+    const tier = optionTier(aiScore);
     const gradeTradeable = grade === 'ELITE' || grade === 'STRONG' || grade === 'ACTION';
     // v21.42: "STRONG trade signal" is a REAL gate, not a badge: fresh
     // live chain + STRONG/ELITE score + chain read not against the side
@@ -1272,6 +1275,20 @@ export function buildOptionSignalCards(desk, deep) {
         checks: confluence.checks,
         warnings: confluence.warnings,
       },
+      // v21.43: compact chain facts for the FreeLLMAPI confirm prompt +
+      // card UI — the card becomes self-contained (no hidden desk lookup).
+      chainContext: chainAnalytics ? {
+        spot: r2(spot),
+        pcr: r2(chainAnalytics.pcr),
+        maxPain: chainAnalytics.maxPain ?? null,
+        atmIV: r1(chainAnalytics.atmIV),
+        ivPercentile: chainAnalytics.ivPercentile ?? null,
+        oiLean: r2(chainAnalytics.flow?.oiLean),
+        oiLeanRead: chainAnalytics.flow?.oiLeanRead || null,
+        gammaFlip: chainAnalytics.gex?.gammaFlip ?? null,
+        callWall: chainAnalytics.gex?.callWall ?? null,
+        putWall: chainAnalytics.gex?.putWall ?? null,
+      } : null,
       ...(structuralDiscount > 0 ? { aiScoreRaw, structuralDiscount } : {}),
       pop,
       breakeven,
@@ -1386,6 +1403,17 @@ async function _buildCardsView(deps, symbols) {
   // v9.6: merge both desks' ranked cards → global TOP 4 by AI score.
   const all = [];
   for (const d of desks) if (d.ok && Array.isArray(d.cards)) all.push(...d.cards);
+  // v21.43: FreeLLMAPI second opinion (strict JSON) on eligible live-chain
+  // cards. Soft deadline — unresolved cards stamp on the next 20s refresh.
+  // AI never creates a strong signal; it can only confirm (+3) or block a
+  // conflict (−8, tradeable=false). Deterministic gate stays in charge.
+  let llmMod = null;
+  let llm = null;
+  try {
+    llmMod = await import('./optionsAiConfirm.js');
+    llm = await llmMod.confirmOptionCards(all);
+  } catch { llm = null; }
+  // re-rank AFTER the ± score adjustment so a conflict cannot sit in TOP 4
   all.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
   const strong = all.filter(c => c.strongSignal);
   const data = {
@@ -1400,8 +1428,12 @@ async function _buildCardsView(deps, symbols) {
       venue: c.venue, aiScore: c.aiScore, tier: c.tier,
       entry: c.entry, target: c.target, stopLoss: c.stopLoss,
       chainAgeMs: c.chainAgeMs, expiry: c.expiry,
+      aiVerdict: c.aiConfirm?.verdict ?? null,
+      aiConfidence: c.aiConfirm?.confidence ?? null,
     })),
-    methodology: 'AI score = 35% index-consensus + 20% POP-at-expiry + 15% reward:risk + 15% delta-fit (ATM ideal) + 15% grade, then ±10 chain-confluence (PCR/OI-lean/max-pain/GEX). STRONG/ELITE requires a fresh live NSE/BSE chain. Nifty50 + Sensex candidates (ATM/ITM/OTM) merged, TOP 4 served; in-session the view refreshes ~20s (stale-while-revalidate — polls stay instant).',
+    // v21.43: FreeLLMAPI health + this cycle's confirm/conflict tally.
+    llm: llm && llmMod ? { ...llmMod.optionAiConfirmStatus(), ...llm } : null,
+    methodology: 'AI score = 35% index-consensus + 20% POP-at-expiry + 15% reward:risk + 15% delta-fit (ATM ideal) + 15% grade, then ±10 chain-confluence (PCR/OI-lean/max-pain/GEX). FreeLLMAPI strict-JSON confirm layer: +3 on confirm, −8 + tradeable=false on conflict (AI never flips side/size/SL). STRONG/ELITE requires a fresh live NSE/BSE chain. Nifty50 + Sensex candidates (ATM/ITM/OTM) merged, TOP 4 served; in-session the view refreshes ~20s (stale-while-revalidate — polls stay instant).',
     desks,
   };
   return data;

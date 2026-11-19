@@ -171,6 +171,8 @@ describe('STRONG/ELITE gate — only a fresh LIVE chain can wear it', () => {
     expect(c.strongSignal).toBe(true);
     expect(c.venue).toBe('NSE');
     expect(c.chainConfluence.aligned).toBe(true);
+    expect(c.chainContext?.pcr).toBe(1.5);
+    expect(c.chainContext?.maxPain).toBe(23200);
   });
 
   it('model chain is capped below STRONG even with a perfect consensus', () => {

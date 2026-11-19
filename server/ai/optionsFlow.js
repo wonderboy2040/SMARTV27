@@ -12,6 +12,14 @@
 
 const r2 = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 
+/** v21.43: ONE card tier ladder shared by the card builder and the
+ *  FreeLLMAPI confirm layer (85 / 80 / 65 — superIntel language). */
+export function optionTier(score) {
+  const n = Number(score);
+  if (!Number.isFinite(n)) return 'WATCH';
+  return n >= 85 ? 'ELITE' : n >= 80 ? 'STRONG' : n >= 65 ? 'ACTION' : 'WATCH';
+}
+
 /**
  * PURE: deterministic direction read off the desk analytics.
  * Returns { pts, direction, why } — pts is a signed conviction tally:

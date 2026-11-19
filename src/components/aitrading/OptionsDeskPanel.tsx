@@ -109,6 +109,13 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
             🔥 STRONG {c.type} SIGNAL
           </span>
         )}
+        {/* v21.43: FreeLLMAPI strict-JSON second opinion (never flips side). */}
+        {c.aiConfirm && (
+          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${c.aiConfirm.verdict === 'CONFIRMED' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35' : c.aiConfirm.verdict === 'CONFLICT' ? 'bg-rose-500/15 text-rose-300 border-rose-500/35' : 'bg-slate-600/20 text-slate-400 border-slate-600/35'}`}
+            title={`${c.aiConfirm.provider || 'FreeLLMAPI'} ${c.aiConfirm.verdict}${c.aiConfirm.note ? ` — ${c.aiConfirm.note}` : ''}${c.aiConfirm.model ? ` · model ${c.aiConfirm.model}` : ''}${c.aiConfirm.latencyMs != null ? ` · ${c.aiConfirm.latencyMs}ms` : ''}${c.aiConfirm.stale ? ' · stale memo' : ''}${c.aiConfirm.applied === false ? ' · analysis only (WATCH card — no score promotion)' : ''}`}>
+            🤖 AI {c.aiConfirm.verdict === 'CONFIRMED' ? '✓' : c.aiConfirm.verdict === 'CONFLICT' ? '✗' : '○'} {c.aiConfirm.choice === 'enter_long' ? 'LONG' : c.aiConfirm.choice === 'enter_short' ? 'SHORT' : 'wait'}{c.aiConfirm.confidence != null ? ` ${Math.round(c.aiConfirm.confidence * 100)}%` : ''}
+          </span>
+        )}
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${bull ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-red-500/15 text-red-300 border-red-500/30'}`}>
           {c.trendTag || `${bull ? '▲ BULLISH' : '▼ BEARISH'} INDEX`}{c.consensus?.confidence != null ? ` · ${c.consensus.confidence}% conf` : ''}
         </span>
@@ -240,6 +247,15 @@ function OptionSignalCardView({ c, onOpened }: { c: OptionSignalCard; onOpened?:
         <div className={`mt-1.5 rounded-lg px-2.5 py-1.5 text-[9px] font-mono leading-relaxed border ${c.chainConfluence.opposed ? 'bg-rose-500/[0.07] border-rose-500/25 text-rose-200/90' : c.chainConfluence.aligned ? 'bg-emerald-500/[0.07] border-emerald-500/25 text-emerald-200/90' : 'bg-slate-700/20 border-slate-600/25 text-slate-400'}`}>
           ⛓ Chain confluence: {c.chainConfluence.direction} ({c.chainConfluence.pts > 0 ? '+' : ''}{c.chainConfluence.pts}) · {c.chainConfluence.aligned ? `✅ ${c.type} ke saath` : c.chainConfluence.opposed ? `⚠ ${c.type} ke against — score capped` : 'neutral'}
           {c.chainConfluence.checks?.length ? ` · ${c.chainConfluence.checks.slice(0, 2).join(' · ')}` : ''}
+        </div>
+      )}
+      {/* v21.43: FreeLLMAPI analysis — the actual second-opinion line. */}
+      {c.aiConfirm && (c.aiConfirm.note || c.aiConfirm.reason) && (
+        <div className={`mt-1.5 rounded-lg px-2.5 py-1.5 text-[9px] font-mono leading-relaxed border ${c.aiConfirm.verdict === 'CONFIRMED' ? 'bg-emerald-500/[0.07] border-emerald-500/25 text-emerald-200/90' : c.aiConfirm.verdict === 'CONFLICT' ? 'bg-rose-500/[0.07] border-rose-500/25 text-rose-200/90' : 'bg-slate-700/20 border-slate-600/25 text-slate-400'}`}>
+          🤖 FreeLLMAPI {c.aiConfirm.verdict === 'CONFIRMED' ? 'CONFIRMED' : c.aiConfirm.verdict === 'CONFLICT' ? 'CONFLICT' : 'ABSTAIN'}
+          {c.aiConfirm.confidence != null ? ` (${Math.round(c.aiConfirm.confidence * 100)}%)` : ''}: {c.aiConfirm.note || c.aiConfirm.reason}
+          {c.aiConfirm.applied === false ? ' · analysis only (WATCH)' : ''}
+          {c.aiConfirm.model ? ` · ${c.aiConfirm.model}` : ''}{c.aiConfirm.stale ? ' · cached' : ''}
         </div>
       )}
 
@@ -382,6 +398,13 @@ function OptionSignalCardsStrip({ onOpened }: { onOpened?: (msg: string, ok: boo
             🔥 {view.strongCount} STRONG {[...new Set((view.strongSignals || []).map(s => s.type))].join('/')} SIGNAL{view.strongCount > 1 ? 'S' : ''}
           </span>
         ) : null}
+        {/* v21.43: FreeLLMAPI confirm-layer health + cycle tally. */}
+        {view?.llm && (
+          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${view.llm.connected ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30' : 'bg-amber-500/10 text-amber-300 border-amber-500/30'}`}
+            title={`FreeLLMAPI ${view.llm.connected ? 'connected' : 'offline'}${view.llm.model ? ` · model ${view.llm.model}` : ''}${view.llm.lastRoutedVia ? ` · routed via ${view.llm.lastRoutedVia}` : ''} · analyzed ${view.llm.analyzed ?? 0} (${view.llm.confirmed ?? 0} confirmed, ${view.llm.conflicted ?? 0} conflict, ${view.llm.pending ?? 0} pending)${view.llm.lastError ? ` · ${view.llm.lastError}` : ''}`}>
+            🤖 FreeLLMAPI {view.llm.connected ? '✓' : 'offline'}{view.llm.confirmed ? ` · ${view.llm.confirmed}✓` : ''}{view.llm.conflicted ? ` · ${view.llm.conflicted}✗` : ''}
+          </span>
+        )}
         <span className="text-[9px] text-slate-500 font-mono">Nifty50 + Sensex · AI-scored TOP 4 (ATM/ITM/OTM candidates) · premium Entry/Target/SL · 15s poll · 20s re-rank</span>
         {/* v21.0.2 OPTIONS AUTO-ENTRY toggle — NIFTY/SENSEX tradeable cards
             se paper auto-entry (server loop optionsAutoEntry.js, default OFF). */}

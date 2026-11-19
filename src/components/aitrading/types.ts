@@ -791,6 +791,39 @@ export interface OptionSignalCard {
     checks?: string[];
     warnings?: string[];
   } | null;
+  /** v21.43: compact chain facts (self-contained FreeLLMAPI prompt + UI). */
+  chainContext?: {
+    spot?: number | null;
+    pcr?: number | null;
+    maxPain?: number | null;
+    atmIV?: number | null;
+    ivPercentile?: number | null;
+    oiLean?: number | null;
+    oiLeanRead?: string | null;
+    gammaFlip?: number | null;
+    callWall?: number | null;
+    putWall?: number | null;
+  } | null;
+  /** v21.43: FreeLLMAPI strict-JSON second opinion. AI never flips side,
+   *  size or SL — CONFIRMED +3 score, CONFLICT −8 + tradeable=false. */
+  aiConfirm?: {
+    provider: string;
+    verdict: 'CONFIRMED' | 'CONFLICT' | 'NEUTRAL' | string;
+    choice?: string | null;
+    proposed?: string | null;
+    confidence?: number | null;
+    note?: string | null;
+    risk?: string | null;
+    reason?: string | null;
+    model?: string | null;
+    routedVia?: string | null;
+    latencyMs?: number | null;
+    cached?: boolean;
+    stale?: boolean;
+    applied?: boolean;
+    at?: number;
+  } | null;
+  aiConflict?: boolean;
   pop?: number | null;
   breakeven?: number | null;
   expectedMovePct?: number | null;
@@ -840,7 +873,30 @@ export interface OptionSignalsView {
     stopLoss: number;
     chainAgeMs?: number | null;
     expiry?: string;
+    aiVerdict?: string | null;
+    aiConfidence?: number | null;
   }>;
+  /** v21.43: FreeLLMAPI confirm-layer health + cycle tally. */
+  llm?: {
+    provider: string;
+    enabled: boolean;
+    connected: boolean;
+    reachable?: boolean;
+    keyPresent?: boolean;
+    model?: string | null;
+    modelsCount?: number | null;
+    lastRoutedVia?: string | null;
+    lastError?: string | null;
+    ttlMs?: number;
+    deadlineMs?: number;
+    memoSize?: number;
+    analyzed?: number;
+    confirmed?: number;
+    conflicted?: number;
+    neutral?: number;
+    pending?: number;
+    reason?: string | null;
+  } | null;
   methodology?: string | null;
   desks: Array<{
     symbol: string;
