@@ -370,3 +370,63 @@ describe('v21.35.0 [B9] — kill-switch L2/L3 journal closure (no more blind mar
     expect((await port.getPositions()).length).toBe(0);
   });
 });
+
+describe('v21.44.x — FLAT-row skip (CoinDCX getPositions returns all 37 contracts)', () => {
+  // BUG (real-money, live): CoinDCX `listFuturesPositions` returns EVERY
+  // tradable contract — 36 of them FLAT (activePos 0). `ApiFuturesPort.
+  // getPositions()` maps those to qty-0 rows. The reconciler treated a FLAT
+  // engine-owned no-SL row as an ORPHAN and called close() on it every 12s →
+  // `ORPHAN B-INJ_USDT/B-BNB_USDT flatten fail (streak 2)` + a Telegram alert
+  // every 5 min, even though the position was already settled. A qty-0 row has
+  // nothing to flatten/close → skip it. (PaperPort never emits qty-0 rows, so
+  // the fake port is hand-built below to reproduce the live shape.)
+  function flatPort(rows: Array<Record<string, unknown>>) {
+    const close = vi.fn(async () => ({ ok: true }));
+    const port = {
+      health: async () => ({ ok: true, mode: 'fake', latencyMs: 0, reasons: [] }),
+      getEquity: async () => ({ totalUSDT: 1000, freeUSDT: 1000, unrealizedUSDT: 0 }),
+      getPositions: async () => rows,
+      close,
+    };
+    return { port, close };
+  }
+
+  it('RECONCILE: a FLAT engine-owned no-SL row is NOT closed + no ORPHAN alert', async () => {
+    const { port, close } = flatPort([
+      { id: 'flat-1', pair: 'B-INJ_USDT', side: 'FLAT', qty: 0, sl: 0, tp: 0 },
+    ]);
+    const alertMsgs: string[] = [];
+    initReconciler({
+      port: port as unknown as Parameters<typeof initReconciler>[0]['port'],
+      positionManager: { _stateForTests: () => [] },
+      alertSink: (m: string) => { alertMsgs.push(m); },
+      env: {},
+      heartbeatFile: HEARTBEAT, killFlagFile: KILL_FLAG,
+    } as unknown as Parameters<typeof initReconciler>[0]);
+    __setEnginePairsForTests(['B-INJ_USDT']); // engine-owned (journal LIVE row)
+    await __driveReconcileTickForTests();
+    // The bug: close() was attempted on the flat row and failed. Now it must
+    // be a no-op — no close attempt, no ORPHAN alert.
+    expect(close).not.toHaveBeenCalled();
+    expect(alertMsgs.some(m => /ORPHAN/i.test(m))).toBe(false);
+  });
+
+  it('L3: FLAT rows are skipped but an OPEN no-SL orphan is still flattened (core rule intact)', async () => {
+    const { port, close } = flatPort([
+      { id: 'flat-1', pair: 'B-INJ_USDT', side: 'FLAT', qty: 0, sl: 0, tp: 0 },
+      { id: 'open-1', pair: 'B-DOGE_USDT', side: 'SHORT', qty: 5, sl: 0, tp: 0 },
+    ]);
+    initReconciler({
+      port: port as unknown as Parameters<typeof initReconciler>[0]['port'],
+      positionManager: { _stateForTests: () => [] },
+      alertSink: () => {},
+      env: {},
+      heartbeatFile: HEARTBEAT, killFlagFile: KILL_FLAG,
+    } as unknown as Parameters<typeof initReconciler>[0]);
+    setKill(3, 'flatten all');
+    await __driveReconcileTickForTests();
+    // close() attempted EXACTLY once — only on the open row, never the FLAT row.
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith({ positionId: 'open-1' });
+  });
+});

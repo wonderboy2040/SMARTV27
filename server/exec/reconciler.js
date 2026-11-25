@@ -241,6 +241,10 @@ async function _reconcileTick() {
     if (_state.killLevel >= 3) {
       const positions = await _state.port.getPositions();
       for (const p of positions) {
+        // v21.44.x: FLAT rows (qty 0) have nothing to flatten — a no-op close
+        // just fails + spams. CoinDCX returns all tradable contracts (mostly
+        // FLAT), so skip them. No-op for PaperPort (never emits qty-0 rows).
+        if (Number(p.qty || 0) <= 0) continue;
         let closed = false, lastErr = null;
         for (let attempt = 0; attempt < 2 && !closed; attempt++) {
           try {
@@ -272,6 +276,9 @@ async function _reconcileTick() {
     if (_state.killLevel === 2) {
       const positions = await _state.port.getPositions();
       for (const p of positions) {
+        // v21.44.x: same FLAT-row skip as the L3 loop above — a qty-0 row has
+        // nothing to close; a no-op close just fails + spams every 12s tick.
+        if (Number(p.qty || 0) <= 0) continue;
         let closed = false, lastErr = null;
         for (let attempt = 0; attempt < 2 && !closed; attempt++) {
           try {
@@ -315,6 +322,12 @@ async function _reconcileTick() {
       const pendingPairs = new Set((Array.isArray(pending) ? pending : []).map(String));
       for (const p of positions) {
         if (pmIds.has(p.id)) continue;
+        // v21.44.x: FLAT row (qty 0) par close() call karna no-op hai jo
+        // fail + alert loop me at jaata hai (CoinDCX listFuturesPositions
+        // saare 37 contracts return karta hai — 36 FLAT). Orphan/adopt dono
+        // branches sirf LIVE positions ke liye meaningful hain; FLAT row par
+        // na toh engine-flatten karna hai, na manual adopt-alert.
+        if (Number(p.qty || 0) <= 0) continue;
         const noSl = p.sl == null || Number(p.sl) <= 0;
         // v20.7.3: numeric trigger fields often use 0 as the "unset"
         // sentinel — treat sl<=0 as unprotected too.

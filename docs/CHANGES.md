@@ -1,5 +1,44 @@
 # Changelog
 
+## v21.44.1 — RECONCILER FLAT-ROW SKIP: STOP ORPHAN "FLATTEN FAIL" SPAM (2026-11-25)
+
+**One real-money bug fixed (found during live auto-mode monitoring):** the
+exec reconciler's orphan-flatten sweep kept calling `close()` on already-settled
+CoinDCX positions every 12s.
+
+### The bug
+- CoinDCX `listFuturesPositions` returns **every tradable contract** — 37 rows,
+  of which 36 are `FLAT` (`activePos 0`). `ApiFuturesPort.getPositions()` maps
+  those to `qty:0` rows.
+- A pair that had a recent LIVE journal row (e.g. `B-INJ_USDT` / `B-BNB_USDT`,
+  opened + settled the same day) stays in the reconciler's `enginePairs` set for
+  the 24h ownership window. Its now-FLAT row has `sl:0` (FLAT rows carry no SL),
+  so the sweep classified it as an **engine-owned no-SL orphan** and called
+  `close()` on a position that no longer exists → `ORPHAN ... flatten fail
+  (throttled, streak 2)` every 12s tick **plus** a Telegram alert every 5 min.
+- No money was at risk (nothing open to close), but the alert flood is exactly
+  what the v21.37.2 throttle was built to prevent, and it masks real alerts.
+
+### The fix (`server/exec/reconciler.js`)
+- All three flatten loops (L3 flatten-all, L2 reduce-only, RECONCILE orphan
+  sweep) now **skip `qty:0` (FLAT) rows** — there is nothing to flatten or
+  close on a flat position. A no-op close just failed + spammed.
+- No-op for `PaperPort` (never emits qty-0 rows — it deletes on close), so the
+  existing orphan/ghost/kill tests are unchanged and stay green.
+
+### Tests
+- New `test/reconciler.test.ts` block (2 tests): a FLAT engine-owned no-SL row
+  must NOT trigger `close()` / ORPHAN alerts; an OPEN no-SL orphan is **still**
+  flattened (core rule intact) — locks the fix without regressing the safety.
+- Full suite green: 300 files / 5464 tests.
+
+### Live verification
+- Restart under the supervisor loaded the fix (running process now v21.44.1).
+- **0 ORPHAN spam lines** emitted since the post-fix boot (vs the 39 that were
+  accruing pre-fix). Open live positions (e.g. `B-XRP_USDT SHORT`) survive the
+  restart untouched; a transient `equityINR=0` wallet read is already guarded
+  (`routes.js:1935` + `mtfAutoLink.js:3630` fall back, never zero-size).
+
 ## v21.44.0 — SELF-IMPROVE ENGINE PERMANENTLY REMOVED + LIVE AUTO-TRADE SIMPLIFIED + COINDCX REALTIME HONESTY (2026-11-24)
 
 **Three asks in this release:** (1) permanently remove the self-improvement
