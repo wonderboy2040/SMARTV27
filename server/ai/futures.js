@@ -40,6 +40,7 @@ import { recordExecution, settlePositionOutcome, markPartialOutcome } from './le
 import { isAmbiguousTransportError } from './coindcxOrders.js'; // v20.3: ambiguous-retry guard (v18.9 spot fix, ported)
 import { computeTrailSl, maxSaneLeverage, fitPlanToRiskCap, evaluateExecutionGate } from './ensemble.js';
 import { pRound } from './lib/priceRound.js';
+import { noteCxServerTime } from './cxClock.js';
 // v21.25.0 DIRECTION CERTIFICATE — strict side + explicit signal→order mapping.
 import { normalizeSide, resolveActivePosSide, buildDirectionCertificate } from './directionCertificate.js';
 import { withJournalLock, pushEntry, todayIST, dailyStats, ratchetSl, exitStageOf, loadProTraderConfig } from './coindcxOrders.js';
@@ -570,6 +571,9 @@ function _rowsFromRtPayload(j, map) {
   // mixed units made correctness luck-dependent.
   const rawTs = num(j?.ts);
   const tsMs = rawTs > 0 ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.now();
+  // v21.44.0: passive server-clock sample (only when the payload really
+  // carried an exchange epoch — never stamp Date.now() as "server time").
+  if (rawTs > 0) noteCxServerTime(tsMs, 'rest-ts');
   for (const [pair, p] of Object.entries(map)) {
     if (!p || typeof p !== 'object') continue;
     const last = num(p.ls);

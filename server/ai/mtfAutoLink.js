@@ -103,6 +103,18 @@ import { evaluateEntryTiming } from './mtfEntryTiming.js';
 // v21.38.0 [PRE-ENTRY RECHECK] — pure, cycle-free gate shared by the auto
 // lane and both manual routes. Real ATR + risk-ratio + deep-verdict aware.
 import { preEntryRecheck, measuredRowAtr } from './preEntryGate.js';
+// v21.44.0 [ENTRY QUALITY CONSENSUS] — safety gates stay hard; independent
+// quality gates must agree before they block. One over-strict quality gate is
+// a warning, two distinct gates are a veto. Pure + dependency-free.
+import {
+  combineQualityVerdicts,
+  normalizeQualityMode,
+  resolveQualityPolicy,
+  isPreEntryQualityBlocker,
+  isEntryTimingQualityBlocker,
+  isLiveQualityQualityBlocker,
+  preEntryVetoIsForced,
+} from './entryQualityConsensus.js';
 // v21.35.4 [PRE-TRADE HIGHER-PROFIT GATES] — deterministic entry-quality gates:
 // Monte-Carlo odds ("time machine" on the symbol's own closed bars) +
 // wick-immune last-closed-bar breakout confirmation.
@@ -163,6 +175,24 @@ export const MTF_AUTO_DEFAULTS = {
   // live) require tier STRONG/ELITE (or superScore >= 80). `false` restores
   // the legacy floor-only eligibility (env MTF_AUTO_STRONG_ONLY=0 window).
   autoStrongOnly: true,
+  // v21.44.2 [LEAN ENTRY LANE] (operator decision 2026-11-24): one switch that
+  // simplifies the auto-trade entry lane — the measured over-blocking was
+  // concentrated in the candidate AND-bar (aiGuard/trap/zone/counterTrend
+  // checks) + 7 stacked quality gates, not in the structural safety core.
+  // When ON (default):
+  //   • candidate pool drops aiGuard>=2 / !trapVeto / !zoneWallVeto /
+  //     !counterTrend (reversal-family flags still stay hard at commit time);
+  //   • the STRONG/ELITE tier gate is bypassed and the live floor widens to
+  //     75 (ACTION tier 75-79 becomes tradeable — resolveLeanLaneModes().leanFloor);
+  //   • every secondary QUALITY gate (MC-odds / breakout / late-wave /
+  //     signal-fidelity / entry-timing quality / pre-entry-recheck quality /
+  //     live-entry-quality + the consensus layer) runs measure-only (shadow)
+  //     — it still logs its would-blocks, it can never veto a clean signal;
+  //   • hard safety stays blocking: direction-verified, SL/target not done,
+  //     row/quote freshness, trap/zone/reversal row flags, risk caps,
+  //     loss-churn lock, direction-lock, entry dedup, quotas.
+  // `false` = full legacy gate stack (every check + every default restored).
+  leanEntryLane: true,
   riskPerTradeINR: 2000,           // per-trade risk budget (qty = risk ÷ |entry−SL|)
   maxPositionsINR: 100000,         // total OPEN notional budget (linked trades)
   maxNotionalPerTradeINR: 50000,   // single trade notional cap
@@ -302,6 +332,29 @@ export const MTF_AUTO_DEFAULTS = {
   preEntryMaxChaseRiskRatio: 0.25,
   preEntryMaxAdverseRiskRatio: 0.20,
   preEntryMaxRowAgeMs: 120_000,
+  // v21.44.0 [ENTRY QUALITY CONSENSUS]: the auto lane's seven independent
+  // quality vetoes (entry timing, pre-entry timing, fidelity, MC odds,
+  // breakout, late wave, live entry quality) now vote. A single quality gate
+  // is a warning; two DISTINCT gates must agree before the entry is blocked.
+  // Safety blockers (direction/stale/SL-through/target-done/trap/zone/deep
+  // conflict/risk locks) are never part of this vote. `single` restores the
+  // legacy any-veto-blocks behaviour; `shadow`/`off` are telemetry-only.
+  // Env: ENTRY_QUALITY_CONSENSUS / ENTRY_QUALITY_CONSENSUS_MIN.
+  //
+  // v21.44.1 [MEASURE-FIRST DEFAULT]: default is now `shadow` — every quality
+  // veto keeps RUNNING and keeps logging its would-block to state.shadowStats
+  // (guards.telemetry), but quality evidence NEVER blocks an entry anymore.
+  // Only the hard safety core above + loss-churn + caps can stop a trade.
+  // Why: seven stacked quality layers blocked more good setups than bad ones
+  // (board showed STRONG + direction right, still nothing opened) — and the
+  // operator asked for fewer, BETTER trades decided by data. Run it a few
+  // sessions, then read the per-gate would-block counts against the settled
+  // ledger: re-arm the gate that actually predicted wins via
+  // ENTRY_QUALITY_CONSENSUS=consensus (or single / per-gate env knobs like
+  // MC_ODDS_GATE / LATE_WAVE_GATE). This key stays operator-settable, so a
+  // persisted config or env value always wins over the default.
+  entryQualityConsensus: 'shadow',
+  entryQualityConsensusMin: 2,
   // v21.41.0 [QUOTE FRESHNESS]: the board row can be fresh while the liveFeed
   // tick it is priced against is stale (dead WS / silent REST leg). 5s.
   preEntryMaxQuoteAgeMs: 5_000,
@@ -688,9 +741,21 @@ function _sanitizeCfg(cfg) {
     process.env.MTF_PRE_ENTRY_MAX_QUOTE_AGE_MS || cfg.preEntryMaxQuoteAgeMs,
     1_000, 120_000, 5_000,
   );
+  // v21.44.0 [ENTRY QUALITY CONSENSUS] — consensus is the safe middle:
+  // one quality gate warns, two independent gates veto. `single` = legacy.
+  out.entryQualityConsensus = normalizeQualityMode(cfg.entryQualityConsensus, 'consensus');
+  out.entryQualityConsensusMin = clampN(
+    process.env.ENTRY_QUALITY_CONSENSUS_MIN || cfg.entryQualityConsensusMin,
+    1, 5, 2,
+  );
   out.autoStrongOnly = cfg.autoStrongOnly !== false
     && String(process.env.MTF_AUTO_STRONG_ONLY || '').trim() !== '0';
   out.paperLiveParity = cfg.paperLiveParity !== false;
+  // v21.44.2 [LEAN ENTRY LANE] — default ON; explicit opt-out only. Env
+  // MTF_LEAN_ENTRY_LANE=0 restores the full legacy gate stack (the same
+  // env-wins-over-config rollout convention as MTF_AUTO_STRONG_ONLY).
+  out.leanEntryLane = cfg.leanEntryLane !== false
+    && String(process.env.MTF_LEAN_ENTRY_LANE || '').trim() !== '0';
   // v21.29.0 [R3–R9] mode allowlist. Unknown/legacy values never silently
   // become enforce — each falls back to its documented default.
   out.reversalGuardV2 = normalizeGuardMode(cfg.reversalGuardV2, 'shadow');
@@ -1055,6 +1120,7 @@ export function evaluateManualEntryGates({
   row = null, side = null, market = 'CRYPTO', lane = 'PAPER',
   entry = null, stopLoss = null, atrPct = null,
   cfg = null, now = Date.now(),
+  extraQualityVetoes = [],
 } = {}) {
   const c = cfg || loadMtfAutoConfig();
   const isLiveLane = String(lane || 'PAPER').toUpperCase() === 'LIVE';
@@ -1065,12 +1131,17 @@ export function evaluateManualEntryGates({
     || '—';
   const sideNorm = normalizeSide(side || row?.side);
   const blockers = [];
+  // v21.44.0 [ENTRY QUALITY CONSENSUS]: stop-floor / fading momentum and
+  // fidelity are quality evidence — they vote. Direction, churn, loss pause
+  // and book caps stay hard and are pushed straight to `blockers`.
+  const qualityVetoes = [];
   const telemetry = {
     lane: laneLbl,
     parity,
     directionVerified: row?.directionVerified === true,
     entryQuality: null,
     fidelity: null,
+    quality: null,
     churn: null,
     lossPause: null,
     caps: null,
@@ -1093,7 +1164,10 @@ export function evaluateManualEntryGates({
       atr: measuredRowAtr({ ...row, entry, stopLoss }),
     });
     telemetry.entryQuality = q;
-    if (q.blocked) blockers.push(`entry quality: ${q.reasons.join(' | ')}`);
+    const hardQ = q.reasons.filter(r => !isLiveQualityQualityBlocker(r));
+    const softQ = q.reasons.filter(isLiveQualityQualityBlocker);
+    if (hardQ.length > 0) blockers.push(`entry quality: ${hardQ.join(' | ')}`);
+    if (softQ.length > 0) qualityVetoes.push({ filter: 'entryQuality', reason: softQ.join(' | ') });
   }
 
   // 3) Signal fidelity — identical scope rule as the auto lane.
@@ -1116,9 +1190,12 @@ export function evaluateManualEntryGates({
         reasons: fid.reasons, regime: fid.regime, rsi: fid.rsi, adx: fid.adx,
         softPoints: fid.softPoints, availableSoft: fid.availableSoft,
       };
-      // shadow = telemetry only; enforce = hard block (auto-lane semantics).
+      // shadow = telemetry only; enforce = quality vote (consensus below).
       if (fid.wouldBlock && fidMode !== 'shadow') {
-        blockers.push(`signal fidelity: ${fid.reasons.join(' | ') || 'fidelity-veto'}`);
+        qualityVetoes.push({
+          filter: fid.filter || 'signalFidelity',
+          reason: fid.reasons.join(' | ') || 'fidelity-veto',
+        });
       }
     } catch { /* fail-open: a crashed evaluator must not fabricate a veto */ }
   }
@@ -1186,12 +1263,25 @@ export function evaluateManualEntryGates({
     }
   }
 
+  // v21.44.0 [ONE QUALITY DECISION] — the same vote as the auto tick, now
+  // including any quality evidence carried from the fresh-quote pre-entry
+  // gate. One gate warns; two distinct gates (or a forced extreme ratio) block.
+  const qPolicy = resolveQualityPolicy(c);
+  const quality = combineQualityVerdicts(
+    [...(Array.isArray(extraQualityVetoes) ? extraQualityVetoes : []), ...qualityVetoes],
+    { mode: qPolicy.mode, minVetoes: qPolicy.minVetoes },
+  );
+  telemetry.quality = quality;
+  if (quality.blocked) {
+    blockers.push(`entry quality consensus (${quality.count}/${quality.minVetoes}${quality.forced ? ' forced' : ''}) — ${quality.summary}`);
+  }
+
   const ok = blockers.length === 0;
   _logEvent(
     'manual-entry-gate',
-    `${sym}: ${laneLbl} ${ok ? 'parity gates passed' : `blocked — ${blockers.join(' | ')}`}`,
+    `${sym}: ${laneLbl} ${ok ? 'parity gates passed' : `blocked — ${blockers.join(' | ')}`}${quality.count > 0 ? ` · quality ${quality.count}/${quality.minVetoes}${quality.blocked ? ' BLOCK' : ' pass'} — ${quality.summary}` : ''}`,
   );
-  return { ok, blocked: !ok, lane: laneLbl, blockers, warnings: [], telemetry, at: now };
+  return { ok, blocked: !ok, lane: laneLbl, blockers, warnings: quality.warnings, telemetry, quality, at: now };
 }
 
 /**
@@ -1230,6 +1320,8 @@ export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
       lossChurnLock: lossChurnLockMode(),
       // v21.38.0 — fresh-quote thesis revalidation + paper/live parity.
       preEntryRecheck: preEntryRecheckMode(),
+      // v21.44.0 — safety hard, quality 2-of-N consensus.
+      entryQualityConsensus: entryQualityConsensusMode(),
     },
     scopes: {
       signalFidelity: String(cfg?.signalFidelityScope || 'live').toLowerCase() === 'all' || cfg?.paperLiveParity === true ? 'all' : 'live',
@@ -1267,9 +1359,16 @@ export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
       // v21.38.0 — pre-entry recheck knobs (pure gate in preEntryGate.js).
       preEntryMaxChaseRiskRatio: Number(cfg?.preEntryMaxChaseRiskRatio) > 0 ? Number(cfg.preEntryMaxChaseRiskRatio) : 0.25,
       preEntryMaxAdverseRiskRatio: Number(cfg?.preEntryMaxAdverseRiskRatio) > 0 ? Number(cfg.preEntryMaxAdverseRiskRatio) : 0.20,
+      // v21.44.0 — independent quality gates required to block.
+      entryQualityConsensusMin: entryQualityConsensusMin(),
       preEntryMaxRowAgeMs: Number(cfg?.preEntryMaxRowAgeMs) > 0 ? Number(cfg.preEntryMaxRowAgeMs) : 120_000,
       preEntryMaxQuoteAgeMs: Number(cfg?.preEntryMaxQuoteAgeMs) > 0 ? Number(cfg.preEntryMaxQuoteAgeMs) : 5_000,
       autoStrongOnly: autoStrongOnlyEnabled(cfg),
+      // v21.44.2 [LEAN ENTRY LANE] — the effective lane the tick actually used:
+      // which quality gates are measure-only + the widened floor the pool
+      // admits. Never silent: a lean lane reports leanFloor 75 + shadow modes
+      // even when the persisted per-gate config still says `enforce`.
+      leanEntryLane: resolveLeanLaneModes(cfg),
     },
     calibration,
     shadowHarness: harness,
@@ -1528,6 +1627,78 @@ export function lossChurnLockMode() { return _guardMode('lossChurnLock', 'LOSS_C
 // v21.38.0 — pure pre-entry recheck (stale / invalidated / chase / reversal /
 // structure break / deep conflict). Same gate for auto + manual paper + live.
 export function preEntryRecheckMode() { return _guardMode('preEntryRecheck', 'PRE_ENTRY_RECHECK', 'enforce'); }
+// v21.44.0 — quality-consensus mode. Env wins over persisted config, same
+// convention as the other rollout flags. `single` restores legacy behaviour.
+// v21.44.1 — measure-first default `shadow` (see MTF_AUTO_DEFAULTS note):
+// no env + no persisted key resolves to shadow, never a silent block.
+export function entryQualityConsensusMode() {
+  const env = process.env.ENTRY_QUALITY_CONSENSUS;
+  if (env != null && String(env).trim() !== '') return normalizeQualityMode(env, 'shadow');
+  return normalizeQualityMode(loadMtfAutoConfig()?.entryQualityConsensus, 'shadow');
+}
+export function entryQualityConsensusMin() {
+  const env = Number(process.env.ENTRY_QUALITY_CONSENSUS_MIN);
+  if (Number.isFinite(env) && env >= 1) return Math.min(5, Math.floor(env));
+  return Math.max(1, Math.min(5, Number(loadMtfAutoConfig()?.entryQualityConsensusMin) || 2));
+}
+
+// ============================================================
+// v21.44.2 [LEAN ENTRY LANE] — pure policy resolvers.
+// ------------------------------------------------------------
+// `resolveLeanLaneModes` is the ONE place where the lean-lane switch maps
+// onto concrete gate modes, so the tick body and the tests share the exact
+// same decision surface. Metals-only is the existing precedent for forcing
+// the premium gates to shadow (its entry contract is PAKKA+trigger+score);
+// the lean lane extends that to the whole non-metals lane on purpose.
+// ============================================================
+
+/**
+ * Resolve the lean-entry-lane policy for one tick.
+ *
+ * @param {object} cfg a SANITIZED config object (loadMtfAutoConfig()); a
+ *   missing/empty object reads the live persisted config.
+ * @returns {{lean:boolean, consensusMode:string, mcMode:string, boMode:string,
+ *   lwMode:string, fidMode:string, leanFloor:number|null}}
+ *   `leanFloor` is non-null only when lean: the widened live-candidate floor
+ *   (ACTION tier 75-79 enters the pool + can take a live order), never below
+ *   the live ACTION minimum.
+ */
+export function resolveLeanLaneModes(cfg = {}) {
+  const c = (cfg && Object.keys(cfg).length > 0) ? cfg : loadMtfAutoConfig();
+  const lean = c.leanEntryLane !== false
+    && String(process.env.MTF_LEAN_ENTRY_LANE || '').trim() !== '0';
+  const metals = c.metalsOnly === true;
+  const consensusMode = lean ? 'shadow' : entryQualityConsensusMode();
+  const mcMode = (lean || metals) ? 'shadow' : mcOddsGateMode();
+  const boMode = (lean || metals) ? 'shadow' : breakoutConfirmGateMode();
+  const lwMode = (lean || metals) ? 'shadow' : lateWaveGateMode();
+  const fidMode = lean ? 'shadow' : signalFidelityMode();
+  const leanFloor = lean
+    ? Math.min(effectiveLiveFloor(c, true), 75)
+    : null;
+  return { lean, consensusMode, mcMode, boMode, lwMode, fidMode, leanFloor };
+}
+
+/**
+ * The lean-lane candidate-bar predicate, extracted for unit tests.
+ *
+ * Legacy lane: a row needs aiGuard>=2 + no trap/zone/counter-trend veto and
+ * (when `strongOnly`) the STRONG/ELITE tier. Lean lane: all four secondary
+ * vetoes are dropped — the pool stays directional + trigger + verified; the
+ * dropped evidence re-surfaces at commit time as (a) the hard pre-entry
+ * recheck row flags and (b) measure-only quality vetoes.
+ *
+ * @returns {boolean} true = the row passes this layer.
+ */
+export function leanCandidateFilter(row, { lean = false, strongOnly = true } = {}) {
+  const r = row || {};
+  if (!lean) {
+    if (r.aiGuard != null && Number(r.aiGuard.approvedCount) < 2) return false;
+    if (r.trapVeto || r.zoneWallVeto || r.counterTrend) return false;
+    if (strongOnly && !isStrongSignal(r)) return false;
+  }
+  return true;
+}
 
 /** True when a scoped gate applies to this tick. `live` never touches paper. */
 export function gateScopeApplies(scope, liveActive) {
@@ -4409,7 +4580,24 @@ export async function mtfAutoTick(p = {}) {
     // P2.1: in LIVE mode the candidate bar is raised to the ACTION floor (65)
     // so WATCH-tier rows never even become live candidates; PAPER keeps the
     // stored floor untouched (backtests stay byte-identical).
-    const candidateMin = Math.min(Number(cfg.minScore) || 75, effectiveLiveFloor(cfg, isLiveExecActive));
+    // v21.44.2 [LEAN ENTRY LANE]: resolve the whole lane policy ONCE per
+    // market. `lean` (default ON) relaxes the candidate AND-bar (drops
+    // aiGuard/trap/zone/counterTrend), bypasses the STRONG/ELITE tier gate,
+    // widens the live floor to 75, and forces every secondary QUALITY gate
+    // (consensus + MC-odds/breakout/late-wave/fidelity) to measure-only
+    // (shadow). Hard safety (direction-verified, SL/target, freshness,
+    // risk caps, loss-churn, direction-lock, dedup) stays blocking.
+    const lane = resolveLeanLaneModes(cfg);
+    const lean = lane.lean;
+    const leanFloor = lane.leanFloor;
+    // v21.44.2: P2.1 byte-identity — the widened floor applies ONLY to the
+    // LIVE lane. Paper mode keeps its stored `effectiveLiveFloor(cfg, false)`
+    // (P2.1: the live clamp never leaked into paper, backtests stay
+    // byte-identical). Legacy mode keeps the exact prior semantics.
+    const effectiveLiveFloorForLane = (leanFloor != null && isLiveExecActive)
+      ? leanFloor
+      : effectiveLiveFloor(cfg, isLiveExecActive);
+    const candidateMin = Math.min(Number(cfg.minScore) || 75, effectiveLiveFloorForLane);
     const picks = metalsMode
       ? metalsAutoCandidates(metalsPool, cfg, { openSymbols, lastEntryAt: effectiveLastEntryAt, failMap, now })
       : dualAutoCandidates(poolRows, { ...cfg, minScore: candidateMin }, { openSymbols, lastEntryAt: effectiveLastEntryAt, now }).map(r => {
@@ -4444,17 +4632,23 @@ export async function mtfAutoTick(p = {}) {
         && !r.trigger?.reversalRisk
         && !r.trigger?.opposingFlow
         && !r.context?.exhausted
-        && (r.aiGuard == null || r.aiGuard.approvedCount >= 2)
-        && !r.trapVeto
-        && !r.zoneWallVeto
-        && !r.counterTrend
+        // v21.44.2 [LEAN ENTRY LANE]: the four secondary vetoes
+        // (aiGuard/trap/zone/counterTrend) are DROPPED when lean — they
+        // re-surface at commit time (hard pre-entry row flags + measure-only
+        // quality vetoes). Legacy lane keeps them. The pure predicate is
+        // `leanCandidateFilter`; inline here only for the `out.skipped`
+        // near-miss visibility.
+        && leanCandidateFilter(r, { lean, strongOnly: false })
       );
     // v21.41.0 [STRONG/ELITE-ONLY AUTO]: user spec — auto trade sirf
     // STRONG (80+) / ELITE (85+) directional setups par. PAPER + LIVE dono.
     // Legacy floor-only behaviour explicitly opt-out (`autoStrongOnly:false`
     // / MTF_AUTO_STRONG_ONLY=0) — the old universalLiveFloor knobs stay
     // valid in that mode. Metals-only lane bhi isi strict gate se guzarta hai.
-    const strongOnly = autoStrongOnlyEnabled(cfg);
+    // v21.44.2 [LEAN ENTRY LANE]: the tier gate is BYPASSED when lean —
+    // the widened 75 floor (leanFloor) is the bar instead; ACTION-tier
+    // (75-79) rows now enter. `autoStrongOnly` only applies in legacy mode.
+    const strongOnly = autoStrongOnlyEnabled(cfg) && !lean;
     if (strongOnly) {
       const beforeStrongGate = eligible.length;
       eligible = eligible.filter(isStrongSignal);
@@ -4477,7 +4671,12 @@ export async function mtfAutoTick(p = {}) {
       // P2.1: this is the LIVE branch — effectiveLiveFloor clamps to ≥ ACTION
       // (65) even if the stored floor is lower (e.g. 50). A stored sub-65
       // floor only ever widens the PAPER candidate pool, never a live order.
-      const liveFloor = effectiveLiveFloor(cfg, true);
+      // v21.44.2 [LEAN ENTRY LANE]: lean widens the LIVE floor to 75 (min of
+      // the live floor and the ACTION bar) — ACTION-tier rows may now open
+      // their own live trade; the legacy 80 floor still stands when lean is
+      // OFF. `leanFloor` is null in legacy mode, so `?? effectiveLiveFloor`
+      // keeps the stored semantics byte-identical for the off path.
+      const liveFloor = leanFloor != null ? leanFloor : effectiveLiveFloor(cfg, true);
       const strongVerified = eligible.filter(r =>
         r.tier === 'ELITE' || r.tier === 'STRONG' || Number(r.superScore) >= liveFloor
       );
@@ -4521,23 +4720,26 @@ export async function mtfAutoTick(p = {}) {
         && !r.boardSideConflict
         // v21.35.7: floor knob here too (fallback path must not be stricter than main)
         // P2.1: live branch — ACTION floor (65) enforced, not the stored value.
-        && (r.tier === 'ELITE' || r.tier === 'STRONG' || Number(r.superScore) >= effectiveLiveFloor(cfg, true))
+        // v21.44.2 [LEAN ENTRY LANE]: the fallback only runs in LIVE mode, so
+        // it honours the widened lane floor (leanFloor 75) when lean, else the
+        // legacy live floor. The tier shortcut below stays live because
+        // `strongOnly` already folds in `!lean` (bypassed in lean mode).
+        && (r.tier === 'ELITE' || r.tier === 'STRONG' || Number(r.superScore) >= (lane.leanFloor != null ? lane.leanFloor : effectiveLiveFloor(cfg, true)))
         && !r.reversalRisk
         && !r.trigger?.reversalRisk
         && !r.trigger?.postPeakTrap
         && !r.trigger?.overextended
         && !r.trigger?.opposingFlow
         && !r.context?.exhausted
-        && (r.aiGuard == null || r.aiGuard.approvedCount >= 2)
-        && !r.trapVeto
-        && !r.zoneWallVeto
-        && !r.counterTrend
+        // v21.44.2 [LEAN ENTRY LANE]: same four-veto drop as the main pool —
+        // they re-surface as hard pre-entry flags + measure-only vetoes.
+        && leanCandidateFilter(r, { lean, strongOnly: false })
         && r.dualAligned !== false
         && (r.tfFit === 'GOOD' || r.tfFit === 'OK' || r.tfFit == null)
         // v21.41.0: fallback must never bypass the STRONG/ELITE-only policy.
         && (!strongOnly || isStrongSignal(r))
         // P2.1: live branch — ACTION floor (65) enforced, not the stored value.
-        && Number(r.superScore) >= effectiveLiveFloor(cfg, true)
+        && Number(r.superScore) >= (lane.leanFloor != null ? lane.leanFloor : effectiveLiveFloor(cfg, true))
         && Number(r.plan?.entry) > 0
         && Number(r.plan?.stopLoss) > 0
       ).sort((a, b) => (Number(b.superScore) || 0) - (Number(a.superScore) || 0)).slice(0, 1);
@@ -4605,6 +4807,14 @@ export async function mtfAutoTick(p = {}) {
       ? Math.max(1, Math.min(eligible.length,
           Math.max(1, effectiveMaxOpenPositions - currentOpenInSession.length)))
       : 1;
+    // v21.44.0 [ENTRY QUALITY CONSENSUS] — resolve the rollout mode ONCE per
+    // tick (env/config read), not per candidate row.
+    // v21.44.2 [LEAN ENTRY LANE]: lean forces the consensus layer shadow —
+    // no quality veto (from any gate, including `force` extremes) can block
+    // while lean is on; hard safety still blocks upstream. Legacy keeps the
+    // operator-configured mode.
+    const consensusMode = lean ? 'shadow' : entryQualityConsensusMode();
+    const consensusMin = entryQualityConsensusMin();
     for (const row of eligible) { // v21.22.0 legacy: strictly 1 trade at a time per session
       if (!multiTrade && (openedThisDesk >= 1 || out.opened.length >= 1)) break;
       // multi-trade: stop when desk headroom or daily quota is exhausted
@@ -4613,6 +4823,15 @@ export async function mtfAutoTick(p = {}) {
       // sessionOpen() already reflects in-tick opens (each fill is pushed to
       // the book), so it alone is the authoritative session-cap check.
       if (sessionOpen().length >= effectiveMaxOpenPositions) break;
+      // v21.44.0 [ENTRY QUALITY CONSENSUS]: quality gates no longer `continue`
+      // one by one. They collect a veto here; the consensus decides once,
+      // after every quality gate has had its say. Safety gates still block
+      // immediately below (and are never added to this list).
+      const qualityVetoes = [];
+      const addQualityVeto = (filter, reason, force = false) => {
+        if (!reason) return;
+        qualityVetoes.push({ filter, reason: String(reason), force: force === true });
+      };
       const sym = normalizeLinkSymbol(row.symbol, market);
       if (!sym || openSymbols.has(sym)) { out.skipped.push(`${sym}: already open`); continue; }
       // v21.30.0 [S4 PERP ENRICHMENT] — add the missing positioning fields
@@ -4688,7 +4907,7 @@ export async function mtfAutoTick(p = {}) {
       // past the entry. Block only clear contradictions (fail-open on missing
       // data). This runs BEFORE the R3-R9 guards so a stale/reversal signal
       // never even reaches the sizing stage.
-      const timingMode = entryTimingGuardMode();
+      const timingMode = lean ? 'shadow' : entryTimingGuardMode();
       const timingQuote = (() => {
         if (market === 'CRYPTO' && p.usdtQuotes) {
           const q = p.usdtQuotes instanceof Map ? p.usdtQuotes.get(sym) : p.usdtQuotes[sym];
@@ -4709,17 +4928,25 @@ export async function mtfAutoTick(p = {}) {
             reason, symbol: sym, market: guardDesk, at: now,
           });
         }
-        if (timingMode === 'shadow') {
-          out.shadow.push({
-            symbol: sym, market: guardDesk,
-            warnings: timingEval.blockers.map(reason => ({ filter: 'entryTiming', mode: timingMode, wouldBlock: true, reason })),
-          });
-          _logEvent('entry-timing-shadow', `${sym}: would-block — ${timingEval.blockers.join(' | ')}`);
-        } else {
-          const why = timingEval.blockers.join(' | ');
+        // Direction/certificate/stale/overextension contradictions are safety:
+        // they still block immediately. Chase/reversal ratios are quality:
+        // they join the consensus instead of killing the ticket alone.
+        const hardTiming = timingEval.blockers.filter(b => !isEntryTimingQualityBlocker(b));
+        const qualityTiming = timingEval.blockers.filter(isEntryTimingQualityBlocker);
+        if (hardTiming.length > 0) {
+          const why = hardTiming.join(' | ');
           out.skipped.push(`${sym}: entry timing blocked — ${why}`);
           _logEvent('entry-timing-block', `${sym}: ${why}`);
           continue;
+        }
+        if (timingMode === 'shadow') {
+          out.shadow.push({
+            symbol: sym, market: guardDesk,
+            warnings: qualityTiming.map(reason => ({ filter: 'entryTiming', mode: timingMode, wouldBlock: true, reason })),
+          });
+          _logEvent('entry-timing-shadow', `${sym}: would-block — ${qualityTiming.join(' | ')}`);
+        } else if (qualityTiming.length > 0) {
+          addQualityVeto('entryTiming', qualityTiming.join(' | '));
         }
       }
       const guardEval = evaluateEntryGuards({
@@ -4771,45 +4998,18 @@ export async function mtfAutoTick(p = {}) {
       if (isUsd && !isSimRow && p.usdtQuotes) {
         const q = p.usdtQuotes instanceof Map ? p.usdtQuotes.get(sym) : p.usdtQuotes[sym];
         if (!(Number(q) > 0)) { out.skipped.push(`${sym}: no live USDT perp quote (feed coverage)`); continue; }
-        // Real-time Pre-Execution Anti-Reversal & Anti-Chase Guard:
-        // 1) If live price has already moved >= 15% of risk distance against signal (toward SL), block entry!
-        // 2) If live price has already run >= 35% of risk distance past entry (late chase after wave), block entry!
-        const livePx = Number(q);
-        const adverseTick = row.side === 'LONG'
-          ? (livePx < entry - 0.15 * riskPerUnit)
-          : (livePx > entry + 0.15 * riskPerUnit);
-        if (adverseTick) {
-          out.skipped.push(`${sym}: live price (${livePx}) reversing against ${row.side} entry (${entry}) — anti-reversal guard blocked entry`);
-          continue;
-        }
-        const chasedTick = row.side === 'LONG'
-          ? (livePx > entry + 0.35 * riskPerUnit)
-          : (livePx < entry - 0.35 * riskPerUnit);
-        if (chasedTick) {
-          out.skipped.push(`${sym}: live price (${livePx}) already ran past ${row.side} entry (${entry}) — anti-late-chase guard blocked entry`);
-          continue;
-        }
+        // v21.44.0 [ONE TIMING AUTHORITY]: the old 15% anti-reversal / 35%
+        // anti-chase hard checks duplicated preEntryRecheck (20% adverse /
+        // 25% chase) and blocked before the consensus could weigh them.
+        // The quote-presence check stays hard; timing is owned by the
+        // pre-entry gate and its quality consensus.
       }
       // v21.23.8 EQUITY SIM quote gate: GLOBALFUTURES rows ke paas CoinDCX perp
       // quote nahi hota — board row ka live ltp (Yahoo/global-rt 5s cache) hi
-      // anti-reversal/anti-chase truth hai. No ltp → koi entry nahi.
+      // timing truth hai. No ltp → koi entry nahi.
       if (isUsd && isSimRow) {
         const livePx = Number(row.ltp) || 0;
         if (!(livePx > 0)) { out.skipped.push(`${sym}: no live USDC sim quote (equity-sim feed coverage)`); continue; }
-        const adverseTick = row.side === 'LONG'
-          ? (livePx < entry - 0.15 * riskPerUnit)
-          : (livePx > entry + 0.15 * riskPerUnit);
-        if (adverseTick) {
-          out.skipped.push(`${sym}: sim price (${livePx}) reversing against ${row.side} entry (${entry}) — anti-reversal guard blocked entry`);
-          continue;
-        }
-        const chasedTick = row.side === 'LONG'
-          ? (livePx > entry + 0.35 * riskPerUnit)
-          : (livePx < entry - 0.35 * riskPerUnit);
-        if (chasedTick) {
-          out.skipped.push(`${sym}: sim price (${livePx}) already ran past ${row.side} entry (${entry}) — anti-late-chase guard blocked entry`);
-          continue;
-        }
       }
 
       // v21.18.0 + v21.22.0 WALLET-AMOUNT LEVERAGE (< ₹10,000 → 10x, ≥ ₹10,000 → 5x)
@@ -4873,11 +5073,18 @@ export async function mtfAutoTick(p = {}) {
       // P2.1: strict live-only mode (executionMode==='live') enforces the
       // ACTION floor (65); paper/notify keep the stored universalLiveFloor so
       // backtests stay byte-identical.
-      const pLiveFloor = effectiveLiveFloor(cfg, cfg.executionMode === 'live');
+      // v21.44.2 [LEAN ENTRY LANE]: lean widens the live-order eligibility
+      // floor to leanFloor (75) — an ACTION-tier (75-79) row may take a live
+      // order in lean mode, gated only by the hard-safety checks. Legacy
+      // keeps the stored effectiveLiveFloor byte-identically (leanFloor is
+      // null there).
+      const pLiveFloor = lane.leanFloor != null ? lane.leanFloor : effectiveLiveFloor(cfg, cfg.executionMode === 'live');
       // v21.41.0: strict tier policy first (STRONG/ELITE or score ≥ 80); the
       // legacy `row.tier === 'ACTION'` shortcut is REMOVED — it let an ACTION
       // row bypass the live floor entirely. With autoStrongOnly:false the
       // stored floor semantics (ACTION 65+) remain available for backtests.
+      // (In lean mode `strongOnly` already folds in `!lean`, so this falls
+      // through to the widened pLiveFloor above — the 75 bar, not the tier gate.)
       const isEliteOrStrong = strongOnly
         ? isStrongSignal(row)
         : (row.tier === 'ELITE' || row.tier === 'STRONG' || Number(row.superScore) >= pLiveFloor);
@@ -4967,9 +5174,20 @@ export async function mtfAutoTick(p = {}) {
             });
             _logEvent('pre-entry-shadow', `${sym}: would-block — ${why}`);
           } else {
-            out.skipped.push(`${sym}: pre-entry recheck blocked — ${why}`);
-            _logEvent('pre-entry-block', `${sym}: ${why} (${pre.state} · ltp ${pre.metrics.livePrice ?? '—'} · entry ${entry} · SL ${sl} · ATR ${pre.metrics.atr ?? '—'} · chase ${pre.metrics.chaseRatio ?? '—'} · adverse ${pre.metrics.adverseRatio ?? '—'})`);
-            continue;
+            // v21.44.0: structural contradictions (direction/stale/SL-through/
+            // target-done/trap/zone/deep conflict) stay hard. Timing evidence
+            // (late chase / reversal / weakening / structure break) joins the
+            // consensus; only an extreme ratio blocks alone.
+            const hardPre = pre.blockers.filter(b => !isPreEntryQualityBlocker(b));
+            const qualityPre = pre.blockers.filter(isPreEntryQualityBlocker);
+            if (hardPre.length > 0) {
+              out.skipped.push(`${sym}: pre-entry recheck blocked — ${hardPre.join(' | ')}`);
+              _logEvent('pre-entry-block', `${sym}: ${hardPre.join(' | ')} (${pre.state} · ltp ${pre.metrics.livePrice ?? '—'} · entry ${entry} · SL ${sl} · ATR ${pre.metrics.atr ?? '—'} · chase ${pre.metrics.chaseRatio ?? '—'} · adverse ${pre.metrics.adverseRatio ?? '—'})`);
+              continue;
+            }
+            if (qualityPre.length > 0) {
+              addQualityVeto('preEntryRecheck', qualityPre.join(' | '), preEntryVetoIsForced(pre.metrics));
+            }
           }
         } else if (pre.warnings.length > 0) {
           out.shadow.push({
@@ -4990,7 +5208,10 @@ export async function mtfAutoTick(p = {}) {
       // Scope defaults to `live`; v21.38.0 `paperLiveParity` (default ON)
       // extends BOTH gates to the paper lane — paper must never open a setup
       // the live lane is blocking (the BNB parity gap).
-      const fidMode = signalFidelityMode();
+      // v21.44.2 [LEAN ENTRY LANE]: fidelity is quality evidence — lean runs
+      // it measure-only (shadow, still logged); legacy keeps its operator mode.
+      // Loss-churn stays exactly as configured (hard safety in the locked list).
+      const fidMode = lane.fidMode;
       const churnMode = lossChurnLockMode();
       const fidApplies = parity || gateScopeApplies(cfg.signalFidelityScope, wantLiveOrder);
       const churnApplies = parity || gateScopeApplies(cfg.lossChurnScope, wantLiveOrder);
@@ -5019,9 +5240,10 @@ export async function mtfAutoTick(p = {}) {
             });
             _logEvent('fidelity-shadow', `${sym}: would-block — ${why}`);
           } else {
-            out.skipped.push(`${sym}: signal fidelity blocked — ${why}`);
-            _logEvent('fidelity-block', `${sym}: ${why} (regime ${fid.regime} · RSI ${fid.rsi ?? '—'} · ADX ${fid.adx ?? '—'} · stable ${fid.stable ?? '—'} · soft ${fid.softPoints}/${fid.availableSoft})`);
-            continue;
+            // v21.44.0: fidelity is quality evidence (CHOP/RSI/family/HTF),
+            // not a structural contradiction — it joins the consensus.
+            addQualityVeto(fid.filter || 'signalFidelity', why);
+            _logEvent('fidelity-veto', `${sym}: quality veto — ${why} (regime ${fid.regime} · RSI ${fid.rsi ?? '—'} · ADX ${fid.adx ?? '—'} · stable ${fid.stable ?? '—'} · soft ${fid.softPoints}/${fid.availableSoft})`);
           }
         }
       }
@@ -5082,10 +5304,20 @@ export async function mtfAutoTick(p = {}) {
           atr: measuredRowAtr({ ...row, entry, stopLoss: sl }),
         });
         if (liveQuality.blocked) {
-          const why = liveQuality.reasons.join(' | ');
-          out.skipped.push(`${sym}: ${laneLbl} entry veto — ${why}`);
-          _logEvent(wantLiveOrder ? 'live-entry-veto' : 'paper-entry-veto', `${sym}: ${laneLbl} ${why} (sl ${liveQuality.slDistPct ?? '—'}% · ATR ${liveQuality.atrPct ?? '—'}% · momentum ${liveQuality.momentumState})`);
-          continue;
+          // v21.44.0: direction remains a hard safety block (also enforced
+          // above); stop-floor / fading-momentum evidence is quality and
+          // joins the consensus.
+          const hardQuality = liveQuality.reasons.filter(b => !isLiveQualityQualityBlocker(b));
+          const softQuality = liveQuality.reasons.filter(isLiveQualityQualityBlocker);
+          if (hardQuality.length > 0) {
+            out.skipped.push(`${sym}: ${laneLbl} entry veto — ${hardQuality.join(' | ')}`);
+            _logEvent(wantLiveOrder ? 'live-entry-veto' : 'paper-entry-veto', `${sym}: ${laneLbl} ${hardQuality.join(' | ')}`);
+            continue;
+          }
+          if (softQuality.length > 0) {
+            addQualityVeto('entryQuality', softQuality.join(' | '));
+            _logEvent('entry-quality-veto', `${sym}: ${laneLbl} quality veto — ${softQuality.join(' | ')} (sl ${liveQuality.slDistPct ?? '—'}% · ATR ${liveQuality.atrPct ?? '—'}% · momentum ${liveQuality.momentumState})`);
+          }
         }
       }
 
@@ -5118,9 +5350,11 @@ export async function mtfAutoTick(p = {}) {
       // PAKKA + triggerFired + score ≥75. The three premium gates still RUN in
       // metals mode so their evidence lands in the shadow log, but they never
       // block the metals entry (mode forced to 'shadow' regardless of config).
-      const mcMode = metalsMode ? 'shadow' : mcOddsGateMode();
-      const boMode = metalsMode ? 'shadow' : breakoutConfirmGateMode();
-      const lwMode = metalsMode ? 'shadow' : lateWaveGateMode();
+      // v21.44.2 [LEAN ENTRY LANE]: lean (or metals, as before) forces these
+      // to shadow — the premium gates still run + log, they just can't veto.
+      const mcMode = lane.mcMode;
+      const boMode = lane.boMode;
+      const lwMode = lane.lwMode;
       if (mcMode !== 'off' || boMode !== 'off' || lwMode !== 'off') {
         const gateRow = { ...row, execMarket: guardDesk };
         // v21.35.5 [GATE-CANDLE FIX]: board stores closed trigger candles under
@@ -5185,15 +5419,57 @@ export async function mtfAutoTick(p = {}) {
           _logEvent('entry-gate-shadow', `${sym}: would-block — ${gateWarnings.map(w => `${w.filter}: ${w.reason}`).join(' | ')}`);
         }
         if ((mcEval?.blocked === true) || (boEval?.blocked === true) || (lwEval?.blocked === true)) {
-          const why = [
-            mcEval?.blocked ? `monteCarloOdds: ${mcEval.reason || 'odds-against'}` : null,
-            boEval?.blocked ? `breakoutConfirm: ${boEval.reason || 'not-confirmed'}` : null,
-            lwEval?.blocked ? `lateWave: ${lwEval.reason || 'late-entry'}` : null,
-          ].filter(Boolean).join(' | ');
-          out.skipped.push(`${sym}: entry gate blocked — ${why}`);
-          _logEvent('entry-gate-block', `${sym}: ${why}`);
-          continue;
+          // v21.44.0: each premium gate is one independent quality vote.
+          // A single negative-EV / late-wave / breakout miss is a warning;
+          // two distinct gates (or an extreme pre-entry ratio) still block.
+          if (mcEval?.blocked) {
+            addQualityVeto(mcEval.filter || 'monteCarloOdds', mcEval.evRealisticR != null
+              ? `${mcEval.reason || 'odds-against'} (ev=${mcEval.evRealisticR.toFixed(2)}R pStop=${mcEval.pStop}% pT1=${mcEval.pTarget}%)`
+              : (mcEval.reason || 'odds-against'));
+          }
+          if (boEval?.blocked) addQualityVeto(boEval.filter || 'breakoutConfirm', boEval.reason || 'not-confirmed');
+          if (lwEval?.blocked) addQualityVeto(lwEval.filter || 'lateWave', lwEval.reason || 'late-entry');
         }
+      }
+
+      // ---------- v21.44.0 [ENTRY QUALITY CONSENSUS] ----------
+      // Every quality gate above has now spoken. Safety contradictions already
+      // `continue`d; this is the ONE place where quality evidence can block.
+      // Default consensus=2: two distinct gates must agree. A single veto is
+      // logged and allowed (the over-blocking the operator reported). An
+      // extreme pre-entry chase/adverse ratio sets `force` and blocks alone.
+      const qualityVerdict = combineQualityVerdicts(qualityVetoes, {
+        mode: consensusMode,
+        minVetoes: consensusMin,
+      });
+      // v21.44.1 [MEASURE-FIRST PERSISTENCE]: per-gate recordShadowDecision
+      // calls only persist when that gate's OWN mode is shadow (the per-gates
+      // stay `enforce` here). So when the CONSENSUS layer is the shadow/
+      // measure layer, record each quality veto AT THIS DECISION POINT, keyed
+      // by its gate filter — that is what later lets the operator join
+      // shadowStats against settled ledger outcomes and ask "which gate's
+      // would-block predicted a win / a loss?". A veto that would not have
+      // blocked even in single-veto mode (i.e. the entry passed clean of
+      // quality vetoes) records nothing: no claim, no noise.
+      for (const v of qualityVerdict.vetoes) {
+        recordShadowDecision(guardState.shadowStats, {
+          filter: v.filter, mode: 'shadow', wouldBlock: true,
+          reason: v.reason, symbol: sym, market: guardDesk, at: now,
+        });
+      }
+      if (qualityVerdict.blocked) {
+        out.skipped.push(`${sym}: entry quality consensus blocked (${qualityVerdict.count}/${qualityVerdict.minVetoes}${qualityVerdict.forced ? ' · forced' : ''}) — ${qualityVerdict.summary}`);
+        _logEvent('entry-quality-block', `${sym}: consensus ${qualityVerdict.count}/${qualityVerdict.minVetoes}${qualityVerdict.forced ? ' forced' : ''} — ${qualityVerdict.summary}`);
+        continue;
+      }
+      if (qualityVerdict.count > 0) {
+        out.shadow.push({
+          symbol: sym, market: guardDesk,
+          warnings: qualityVerdict.warnings.map(v => ({
+            filter: v.filter, mode: 'consensus-pass', wouldBlock: false, reason: v.reason,
+          })),
+        });
+        _logEvent('entry-quality-consensus-pass', `${sym}: ${qualityVerdict.count}/${qualityVerdict.minVetoes} quality veto(s) — entry allowed: ${qualityVerdict.summary}`);
       }
 
       const res = paper.openPaperTrade?.({

@@ -250,11 +250,15 @@ describe('v21.23.9 S7 — fut book ts seconds-normalization (futures overlay sil
     expect(Number(row.ts)).toBe(ms);
   });
   it('cmRT seconds fallback bhi normalize', () => {
+    // v21.44.0: LTP-only serving — an mp-only row no longer appears in the
+    // snapshot, so the ts normalization is tested on a row with a real `ls`
+    // (the seconds cmRT is still the ts source under test).
     const sec = Math.floor(Date.now() / 1000) - 1;
-    mergeFutBook({ 'B-XAG_USDT': { mp: 38.5, cmRT: sec } }, 0);
+    mergeFutBook({ 'B-XAG_USDT': { ls: 38.5, mp: 38.6, cmRT: sec } }, 0);
     const row = futBookSnapshot(10_000).get('B-XAG_USDT');
     expect(row).toBeTruthy();
     expect(Number(row.ts)).toBeGreaterThan(1e12);
+    expect(row!.last).toBe(38.5); // LTP — mark stays a separate field
   });
   it('cxWsCandles _futTick defensive seconds→ms + dead row.at read GONE (source pin)', () => {
     expect(CXWS_SRC).toContain('const atMs = tsRaw > 0 && tsRaw < 1e12 ? tsRaw * 1000 : tsRaw;');

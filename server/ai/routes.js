@@ -139,24 +139,15 @@ import {
 } from './telegramPush.js';
 // v10.9 WEEKLY REVIEW — journal + calibration → one LLM narration
 import { runWeeklyPerformanceReview, weeklyReviewStatus, scheduleWeeklyReviewPush } from './weeklyReview.js';
-// v19.0 SELF-IMPROVEMENT ENGINE (Phases 1-5) — the closed loop:
-// v20.6.3: SELF-IMPROVEMENT ENGINE — COMPLETELY REMOVED (default off).
-// The user asked to "completely remove" the loop. v20.6.0 disabled the
-// intervals (default SELFIMPROVE_ENABLED=false). v20.6.3 removed the 14
-// /api/ai/self/* route handlers + the panel .tsx file.
-// v20.7.11 DEAD-CODE PURGE: the three modules that had ZERO remaining
-// consumers (retrainBridge.js — ml-service training bridge, whose only
-// importer selfStatus.js was also dead; strategyEvolution.js — evolution
-// runner, only commented route; selfStatus.js — the /self status rollup)
-// are now DELETED from the tree. The six modules that still have live
-// wiring under the opt-in SELFIMPROVE_ENABLED=true flag in server/index.js
-// (outcomeHarvester, driftMonitor, gateTuner, lessonsEngine, selfCouncil,
-// evolutionLedger) remain — council.js also consumes lessonsEngine for
-// the lessonsBlock prompt.
-//
-// To re-enable manually: set SELFIMPROVE_ENABLED=true in .env (the
-// index.js opt-in block arms the loop intervals).
-// Deleted modules are recoverable from git history (pre-v20.7.11).
+// v19.0 SELF-IMPROVEMENT ENGINE — PERMANENTLY REMOVED (v21.44.0).
+// History: v20.6.3 removed the 14 /api/ai/self/* route handlers + the
+// panel; v20.7.11 deleted retrainBridge/strategyEvolution/selfStatus;
+// v21.44.0 deleted the index.js scheduler loop + gateTuner.js +
+// selfCouncil.js + the SELFIMPROVE_* env flags. What survives is the
+// passive read-side only: driftMonitor (driftReport), lessonsEngine
+// (lessonsForPrompt — council.js still imports it, crash-guarded),
+// outcomeHarvester, evolutionLedger — all honest no-ops on an empty
+// dataset. Nothing re-arms the loop; deleted code is in git history.
 // v10.16 SECTION 2: MANUAL TRADE TRACKER — user's own trades get the
 // same live tracking + conviction intelligence the desk gives its own.
 // v12.0: + R-multiple/MFE-MAE excursion tracking + aggregate stats.
@@ -177,6 +168,10 @@ import {
 // v21.38.0 [PRE-ENTRY RECHECK] — pure shared gate for manual PAPER/LIVE board
 // buttons (same module the auto lane uses; see preEntryGate.js).
 import { preEntryRecheck } from './preEntryGate.js';
+// v21.44.0 [ENTRY QUALITY CONSENSUS] — the manual buttons use the same hard vs
+// quality split as the auto tick: safety blockers 409 immediately, quality
+// evidence votes (2 distinct gates by default).
+import { classifyPreEntryVerdict } from './entryQualityConsensus.js';
 // v18.6.4: 30s TV-batch micro-cache for the tracker's India fallback —
 // the 5s poll no longer fires an uncached TV scanner POST per cycle.
 const _tvIndiaBatchCache = new Map();
@@ -1271,13 +1266,18 @@ export function registerAITradingRoutes(app, deps) {
       // v21.38.0 [PRE-ENTRY RECHECK]: fresh-quote revalidation of the exact
       // thesis before the ticket is registered anywhere. Same gate as auto.
       const preGate = await mtfPreEntryVerdict({ row, side: normalizeSide(row.side), market });
+      let preQualityVetoes = [];
       if (preGate.mode === 'enforce' && preGate.verdict && preGate.verdict.ok !== true) {
-        const why = preGate.verdict.blockers.join(' | ');
-        const preMsg = `${symbol}: PAPER ${row.side} blocked — pre-entry recheck: ${why}`;
-        return res.status(409).json({
-          ok: false, blocked: true, error: preMsg, reason: preMsg,
-          blockers: preGate.verdict.blockers, preEntry: preGate.verdict,
-        });
+        const preSplit = classifyPreEntryVerdict(preGate.verdict);
+        if (preSplit.hard.length > 0) {
+          const why = preSplit.hard.join(' | ');
+          const preMsg = `${symbol}: PAPER ${row.side} blocked — pre-entry recheck: ${why}`;
+          return res.status(409).json({
+            ok: false, blocked: true, error: preMsg, reason: preMsg,
+            blockers: preSplit.hard, preEntry: preGate.verdict,
+          });
+        }
+        preQualityVetoes = preSplit.vetoes;
       }
       // v21.25.0 EXPLICIT DIRECTION CERTIFICATE — the paper ticket must prove
       // LONG→buy / SHORT→sell, SL/target polarity and no activePos conflict
@@ -1329,6 +1329,7 @@ export function registerAITradingRoutes(app, deps) {
         stopLoss: Number(row.plan?.stopLoss),
         atrPct: entryAtrPct,
         cfg,
+        extraQualityVetoes: preQualityVetoes,
       });
       if (!manualGate.ok) {
         const parityWhy = manualGate.blockers.join(' | ');
@@ -1558,13 +1559,18 @@ export function registerAITradingRoutes(app, deps) {
       // v21.38.0 [PRE-ENTRY RECHECK]: the same pure gate the auto lane runs —
       // fresh quote vs planned entry/SL/T1, real ATR, deep verdict, staleness.
       const preGate = await mtfPreEntryVerdict({ row, side, market });
+      let preQualityVetoes = [];
       if (preGate.mode === 'enforce' && preGate.verdict && preGate.verdict.ok !== true) {
-        const why = preGate.verdict.blockers.join(' | ');
-        const preMsg = `${symbol}: LIVE ${side} blocked — pre-entry recheck: ${why}`;
-        return res.status(409).json({
-          ok: false, blocked: true, error: preMsg, reason: preMsg,
-          blockers: preGate.verdict.blockers, preEntry: preGate.verdict,
-        });
+        const preSplit = classifyPreEntryVerdict(preGate.verdict);
+        if (preSplit.hard.length > 0) {
+          const why = preSplit.hard.join(' | ');
+          const preMsg = `${symbol}: LIVE ${side} blocked — pre-entry recheck: ${why}`;
+          return res.status(409).json({
+            ok: false, blocked: true, error: preMsg, reason: preMsg,
+            blockers: preSplit.hard, preEntry: preGate.verdict,
+          });
+        }
+        preQualityVetoes = preSplit.vetoes;
       }
       const pEntry = Number(row.plan?.entry);
       const pSl = Number(row.plan?.stopLoss);
@@ -1621,6 +1627,7 @@ export function registerAITradingRoutes(app, deps) {
         stopLoss: Number(row.plan?.stopLoss),
         atrPct: entryAtrPct,
         cfg,
+        extraQualityVetoes: preQualityVetoes,
       });
       if (!manualGate.ok) {
         const parityWhy = manualGate.blockers.join(' | ');

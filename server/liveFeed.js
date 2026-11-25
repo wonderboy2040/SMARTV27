@@ -24,6 +24,19 @@ export function setTick(key, data, source) {
     // clock-skewed). This is the local INGEST timestamp the entry gate trusts
     // when it asks "is this quote still tradeable?".
     receivedAt: now,
+    // v21.44.0 [CLOCK-SKEW HONESTY]: the exchange's OWN clock, when the
+    // source provides one. `time` can be a local stamp (spot direct push)
+    // or a trade stamp (futures WS), so downstream freshness MUST NOT
+    // guess. `exchangeTime` is normalized to ms and used only to compute
+    // the true quote age against cxNow() — never as an ingest clock.
+    exchangeTime: (() => {
+      const raw = Number(data.exchangeTime ?? data.exchangeTs);
+      if (!(raw > 0)) return undefined;
+      return raw < 1e12 ? Math.round(raw * 1000) : Math.round(raw);
+    })(),
+    // v21.44.0 [LTP-ONLY FILLS]: a mark-price keep-alive is a valid display
+    // tick but NEVER a tradeable LTP. Tag it so entry/fill gates can skip it.
+    basis: data.basis === 'mark' ? 'mark' : undefined,
     source: source || data.source || 'live',
     // 2026 P&L accuracy pass: the REAL previous close (when the source
     // provides it) so Today's P&L = (price - prevClose) * qty exactly —
@@ -39,6 +52,27 @@ export function setTick(key, data, source) {
 
 export function getTick(key) {
   return _ticks.get(key) || null;
+}
+
+/**
+ * v21.44.0 [CLOCK-SKEW IMMUNITY] — age of OUR ingest, not of the exchange
+ * epoch. `receivedAt` is written with the server's local clock, so
+ * `localNow - receivedAt` is exact even when the box clock is 3-5s behind
+ * UTC (the old `Date.now() - tick.time` produced NEGATIVE ages for
+ * CoinDCX ticks and made stale quotes look fresh).
+ *
+ * Fallback to `time` only for hand-built ticks that predate receivedAt
+ * (tests/fixtures); every live setTick() carries receivedAt.
+ *
+ * @param {{receivedAt?:number,time?:number}} tick
+ * @param {number} [now] local epoch ms
+ * @returns {number} age in ms (>=0), Infinity when no timestamp exists
+ */
+export function tickAgeMs(tick, now = Date.now()) {
+  const at = Number(tick?.receivedAt);
+  if (at > 0) return Math.max(0, now - at);
+  const t = Number(tick?.time);
+  return t > 0 ? Math.max(0, now - t) : Infinity;
 }
 
 /**
@@ -75,7 +109,7 @@ export function entryFeedKeys(symbol, execMarket) {
  * @param {string[]} keys            candidate liveFeed keys (FUT_BTC, IN_BTC…)
  * @param {number}   price           the quote the entry gate is about to use
  * @param {{now?:number, tolerancePct?:number}} [opts]
- * @returns {{ageMs:number, source:string|null, key:string, price:number}|null}
+ * @returns {{ageMs:number, source:string|null, key:string, price:number, basis:string|null}|null}
  */
 export function quoteFreshness(keys, price, { now = Date.now(), tolerancePct = 1 } = {}) {
   const px = Number(price);
@@ -87,9 +121,12 @@ export function quoteFreshness(keys, price, { now = Date.now(), tolerancePct = 1
     const tickPx = Number(t?.price);
     const receivedAt = Number(t?.receivedAt);
     if (!(tickPx > 0) || !(receivedAt > 0)) continue;
+    // v21.44.0: mark-price keep-alives are display-only. A paper/live fill
+    // must never source its LTP from the mark while a true last price ages.
+    if (t?.basis === 'mark') continue;
     if (Math.abs(tickPx - px) / px > tol) continue;
     if (!best || receivedAt > best.receivedAt) {
-      best = { receivedAt, source: t.source || null, key, price: tickPx };
+      best = { receivedAt, source: t.source || null, key, price: tickPx, basis: t.basis || null };
     }
   }
   if (!best) return null;
@@ -98,6 +135,7 @@ export function quoteFreshness(keys, price, { now = Date.now(), tolerancePct = 1
     source: best.source,
     key: best.key,
     price: best.price,
+    basis: best.basis,
   };
 }
 

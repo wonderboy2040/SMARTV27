@@ -1,5 +1,101 @@
 # Changelog
 
+## v21.44.0 — SELF-IMPROVE ENGINE PERMANENTLY REMOVED + LIVE AUTO-TRADE SIMPLIFIED + COINDCX REALTIME HONESTY (2026-11-24)
+
+**Three asks in this release:** (1) permanently remove the self-improvement
+engine (`v67-gauntlet` + `selfImproveEngine` were its test files) and clean
+up the code it pulled; (2) the live auto-trade lane is stacked with too many
+gates/checks and the good signals are not getting through — simplify it;
+(3) CoinDCX prices must show "as fast as CoinDCX allows, without fake
+freshness" on a box whose clock runs 3-5s behind UTC — fix the clock math
+and make the SSE wire cadence domain-honest.
+
+### Self-improve engine — PERMANENT REMOVAL
+- **Deleted:** the `server/index.js` scheduler loop, `server/ai/gateTuner.js`,
+  `server/ai/selfCouncil.js`, `test/selfImproveEngine.test.ts`,
+  `test/v67-gauntlet.test.ts`, and every `SELFIMPROVE_ENABLED / AUTO_TUNE /
+  AUTO_RETRAIN` flag (`.env` + `.env.example`). Nothing reads those flags
+  anymore; no code path re-arms the loop.
+- **`driftMonitor.js` is now read-side only:** the orphaned `runDriftCheck()`
+  scheduler half (its sole caller was the deleted loop) + the `recordChange`
+  import + alarm/Telegram state are gone. `driftReport` / `psi` / `voteDrift`
+  / `calibrationDrift` / `performanceDrift` remain.
+- **Kept (passive read-side, degrades honestly on empty data):**
+  `driftMonitor.driftReport` (accuracy-dashboard DRIFT chip + v21.33
+  champion/challenger watch), `lessonsEngine.lessonsForPrompt` (council
+  debate, crash-guarded), `outcomeHarvester`, `evolutionLedger`. All three
+  consumers are null/crash-guarded.
+- **"v67-gauntlet" = test-file only.** The core v6.7 tamper-evident
+  ledger, the concentration guard, and the execution pipeline are
+  UNTOUCHED — that is the trading core, not unwanted code.
+- Stale comment refs to the deleted modules fixed in `routes.js`,
+  `evolutionLedger.js`, `ledger.js`, `v702-audit.test.ts`, `CoinDcxTab.tsx`,
+  and the `index.js` header. The dataset files
+  (`selfimprove-outcomes.json`, `ai-evolution-ledger.json`) are left in
+  place; the kept read-side still reads them (last-harvested snapshot).
+
+### Live auto-trade — LEAN ENTRY LANE (one switch, fully reversible)
+**Why:** the operator-measured over-blocking (last-200 live events:
+`paper-entry-veto` 58 · `pre-entry-block` 55 · `entry-timing-block` 28 ·
+`fidelity-block` 13) was concentrated in the candidate AND-bar + 7 stacked
+quality gates, not in the structural safety core. One switch simplifies it.
+
+- **`leanEntryLane` (config, default `true`; env kill-switch
+  `MTF_LEAN_ENTRY_LANE=0`)** in `server/ai/mtfAutoLink.js`. `false`
+  restores the full legacy gate stack byte-identically.
+- **Candidate pool relaxed:** drops the `aiGuard>=2`, `!trapVeto`,
+  `!zoneWallVeto`, `!counterTrend` AND-conditions (reversal-family flags
+  stay); the STRONG/ELITE tier gate is bypassed and the live floor widens
+  `80 → 75` — ACTION-tier (75-79) rows now enter + can take a live order.
+  P2.1 preserved: the widened floor touches the LIVE lane only; the paper
+  candidate bar stays `min(minScore, stored floor)` (backtests byte-identical).
+- **Secondary quality gates → measure-only (shadow) while lean:**
+  entry-timing quality, pre-entry-recheck quality, signal-fidelity,
+  MC-odds, breakout-confirm, late-wave, live-entry-quality + the whole
+  consensus layer (even `force` extremes) — they still log would-blocks,
+  they can never veto a clean signal.
+- **Hard safety stays blocking (unchanged):** direction-verified,
+  SL-through / target-done, row + quote freshness, trap/zone/reversal row
+  flags, risk caps, loss-churn lock, direction-lock, entry dedup, quotas.
+- **Never silent:** `resolveLeanLaneModes(cfg)` (new exported pure helper)
+  + `leanCandidateFilter` (new pool predicate) — the exact effective lane
+  (which gates are measure-only, the floor) is surfaced in
+  `mtfAutoStatus().guards.thresholds.leanEntryLane`.
+- **Tests:** new `test/leanEntryLaneV21440.test.ts` (12 tests: default
+  matrix, pool drop, 75 floor live eligibility, two-gate veto
+  measure-only, hard-safety still blocks, off-path restoration); the 7
+  legacy-contract tests that pinned the old block behavior are locked to
+  the off-path (`leanEntryLane: false`) — legacy coverage survives via
+  the off-path, no test deleted.
+
+### CoinDCX realtime honesty + domain-aware SSE tick gate
+The PC clock runs ~3-5s **behind** UTC, so CoinDCX tick ages computed
+against `Date.now()` went negative (stale ticks looked fresh; fresh ticks
+tripped the `now - t < 8s` gates into unnecessary REST fallbacks):
+
+- **`server/ai/cxClock.js` (new):** samples the CoinDCX payload `ts`
+  (WS `currentPrices@futures/@spot` + REST `j.ts`), median-filters the
+  skew, and exposes `noteCxServerTime` / `cxNow` / `cxClockOffsetMs` /
+  `cxClockStatus`. `liveFeed.tickAgeMs` now measures OUR ingest
+  (`receivedAt`), never the exchange epoch against a skewed local clock.
+  Mark-price keep-alives are display-only — `quoteFreshness` can never
+  certify a mark as a tradeable LTP.
+- **`server/lib/tickGate.js` (new):** the per-symbol SSE gate extracted
+  from `/api/stream` into a testable module. Two honest cadences — FAST
+  domain (CoinDCX spot INR / FUT / GLOB): 100ms cap, 0.001% dead-band,
+  15s flat-price heartbeat; SLOW domain (NSE / US equities): the proven
+  1s / 0.05% / 45s gate unchanged. `at` = last SENT time (the old gate
+  refreshed it on dead-band suppression, starving the next real move).
+  Wired into `cryptoStream.js` / `liveFeed.js`; client freshness
+  (`manualLiveMerge.liveTickAgeMs`) adds elapsed time to the server's
+  `feedAgeMs` so freshness keeps decaying between frames.
+- **`docs/ADOPTION-PLAN-MTF-ENTRY-ULTRA.md` (new):** analysis-only
+  adoption plan for the two v21.38-era feature-branch snapshots
+  (MTF-Entry-Update + ULTRA) — verdict: surgical adoption, never
+  wholesale-copy (would delete v21.39/v21.40 fixes).
+- **Tests:** `test/cxRealtimeV21440.test.ts` (clock offset + freshness
+  contract) + `test/tickGateV21440.test.ts` (wire discipline).
+
 ## v22.0.0 — FREELMAPI MIGRATION: ONE LOCAL ROUTER FOR ALL AI LANES (2026-11-08)
 
 **The site now has ONE AI engine: the locally installed FreeLLMAPI gateway (OpenAI-compatible, `http://127.0.0.1:31415`). It owns the upstream provider keys, model catalog, quotas and smart routing. The legacy local model server and the cloud CLI bridge are fully retired — no UI toggle, no server import, no boot hook, no test or doc reference remains.**

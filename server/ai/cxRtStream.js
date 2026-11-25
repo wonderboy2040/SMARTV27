@@ -60,7 +60,8 @@
 //   • serve-stale on transient failure: liveFeed keeps the last
 //     good tick; the SSE throttle hides sub-400ms jitter.
 // ============================================================
-import { setTick, getTick } from '../liveFeed.js';
+import { setTick, getTick, tickAgeMs } from '../liveFeed.js';
+import { noteCxServerTime } from './cxClock.js';
 import { fetchFuturesPrices } from './futures.js';
 import { fetchGlobalFuturesRt, fetchGlobalQuotes, syntheticPriceAt, GLOBAL_FUTURES_UNIVERSE } from './globalFutures.js';
 import { createCxSocketIo } from './cxSocketIo.js';
@@ -591,7 +592,10 @@ async function _binanceFutBook(bases) {
  *  (a fresh <5s binance-fut-ws tick)? Such symbols skip the REST fallback. */
 function _binanceWsFreshFor(base) {
   const t = getTick(`FUT_${base}`);
-  return !!t && t.source === 'binance-fut-ws' && (_nowFn() - (t.time || 0)) < 5000;
+  // v21.44.0: ingest age (receivedAt) — `t.time` is Binance's exchange
+  // epoch, and on this 3-5s-behind box the old local-vs-exchange compare
+  // overstated the fresh window (REST skipped for stale symbols).
+  return !!t && t.source === 'binance-fut-ws' && tickAgeMs(t, _nowFn()) < 5000;
 }
 
 async function _pollGlobal(now) {
@@ -860,14 +864,15 @@ function _onWsEvent(name, payload) {
   _landWsTick(m[2] === 'USDC' ? 'GLOB' : 'FUT', m[1], row);
 }
 
-function _landWsTick(domain, sym, d) {
+function _landWsTick(domain, sym, d, opts = null) {
   // only subscribed symbols (the socket carries the WHOLE channel stream)
   if (domain === 'FUT' ? !_futSubscribed.has(sym) : !_globSubscribed.has(sym)) return;
   if (!d || typeof d !== 'object') return;
   const price = _num(d.p) || _num(d.ls) || _num(d.price) || _num(d.last_price);
   if (!(price > 0)) return;
   const change = _num(d.pc) || _num(d.change) || _num(d.dp) || 0;
-  let time = _num(d.T) || _num(d.ts) || _num(d.btST) || _nowFn();
+  const rawExchangeTs = _num(d.T) || _num(d.ts) || _num(d.btST);
+  let time = rawExchangeTs || _nowFn();
   // v10.13 (deep-recheck M3): epoch UNIT normalization. The guard below
   // compares this tick against ticks written by the REST pollers (futures.js
   // `j.ts`, globalFutures `j.ts` — CoinDCX serves SECONDS) and the
@@ -881,6 +886,7 @@ function _landWsTick(domain, sym, d) {
   const last = getTick(key);
   if (last && last.time > time + 1500) return;
   _wsLastTickAt = _nowFn(); // the HEALTH PROOF — REST slows to the 10s floor
+  const markBasis = opts?.basis === 'mark';
   setTick(key, {
     price,
     change,
@@ -888,8 +894,16 @@ function _landWsTick(domain, sym, d) {
     low: _num(d.l) || price,
     volume: _num(d.v) || 0,
     time,
+    // v21.44.0: true exchange epoch (ms) for honest quote-age labels.
+    // Only when the row really carried one — a local fallback stamp must
+    // never masquerade as an exchange timestamp.
+    exchangeTime: rawExchangeTs > 0 ? time : undefined,
+    // v21.44.0: a mark keep-alive is display-only — never a fillable LTP.
+    basis: markBasis ? 'mark' : undefined,
     prevClose: change > -100 ? price / (1 + change / 100) : undefined,
-  }, domain === 'FUT' ? 'coindcx-fut-ws' : 'coindcx-glob-ws');
+  }, markBasis
+    ? (domain === 'FUT' ? 'coindcx-fut-mark' : 'coindcx-glob-mark')
+    : (domain === 'FUT' ? 'coindcx-fut-ws' : 'coindcx-glob-ws'));
   _syncRestCadence(); // the proof just landed — slow REST to the floor NOW
   if (domain === 'FUT') _syncBinanceFutTier(); // cx owns FUT again → tier stands down
 }
@@ -904,6 +918,8 @@ function _onFutBookEvent(payload) {
     try { d = JSON.parse(d); } catch { return; }
   }
   if (!d || typeof d !== 'object' || !d.prices || typeof d.prices !== 'object') return;
+  // v21.44.0: passive CoinDCX clock sample (event `ts`, ms on the live wire).
+  noteCxServerTime(d.ts, 'fut-ws', _nowFn());
   mergeFutBook(d.prices, _num(d.ts));
   for (const [rawPair, row] of Object.entries(d.prices)) {
     if (!row || typeof row !== 'object') continue;
@@ -929,8 +945,11 @@ function _onFutBookEvent(payload) {
 function _landMarkIfStale(domain, sym, row) {
   const key = `${domain}_${sym}`;
   const last = getTick(key);
-  if (last && (_nowFn() - (last.time || 0)) < 8_000) return;
-  _landWsTick(domain, sym, { ...row, ls: row.mp });
+  // v21.44.0: measure OUR ingest age — the old `now - last.time` went
+  // NEGATIVE whenever the box clock lagged CoinDCX (3-5s here), so this
+  // keep-alive fired even on a fresh tick (and vice versa).
+  if (last && tickAgeMs(last, _nowFn()) < 8_000) return;
+  _landWsTick(domain, sym, { ...row, ls: row.mp }, { basis: 'mark' });
 }
 
 /** A heartbeat-only book row (no ls/mp) still proves the socket is

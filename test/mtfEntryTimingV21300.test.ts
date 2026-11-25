@@ -165,10 +165,16 @@ describe('v21.30.0 — timing guard wiring pins', () => {
     expect(autoSrc.indexOf('const timingEval')).toBeLessThan(autoSrc.indexOf('const guardEval'));
   });
 
-  it('tightened live quote ratios and row freshness stamps are present', () => {
-    expect(autoSrc).toContain('0.15 * riskPerUnit');
-    expect(autoSrc).toContain('0.35 * riskPerUnit');
+  it('one timing authority: duplicate tick ratios are gone; pre-entry owns timing', () => {
+    // v21.44.0: the 15%/35% tick guards duplicated preEntryRecheck's
+    // 20% adverse / 25% chase thresholds and blocked before the quality
+    // consensus could weigh them. Only one authority remains.
+    expect(autoSrc).not.toContain('0.15 * riskPerUnit');
+    expect(autoSrc).not.toContain('0.35 * riskPerUnit');
     expect(autoSrc).not.toContain('0.55 * riskPerUnit');
+    expect(autoSrc).toContain('preEntryMaxChaseRiskRatio');
+    expect(autoSrc).toContain('preEntryMaxAdverseRiskRatio');
+    expect(autoSrc).toContain('entryQualityConsensus');
     expect(boardSrc).toContain('builtAt: Date.now()');
   });
 });

@@ -214,7 +214,9 @@ function _spotInrTick(base) {
 /** Futures WS book, USDT-perp row for the base (e.g. BTC → B-BTC_USDT). */
 function _futTick(base) {
   const row = futBookSnapshot(FUT_TICK_FRESH_MS).get(`B-${base}_USDT`);
-  const price = Number(row?.last || row?.mark) || 0;
+  // v21.44.0: LTP only — futBookSnapshot no longer promotes mark into last,
+  // so candle rescaling can never silently use an index-weighted price.
+  const price = Number(row?.last) || 0;
   if (!(price > 0)) return null;
   // v21.23.9 [F5]: defensive seconds→ms scale — mergeFutBook ab btST/cmRT
   // normalize karta hai, par purane/edge rows (ts absent updates) kabhi

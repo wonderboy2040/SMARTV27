@@ -487,7 +487,9 @@ function _tickFor(getTick, market, symbol) {
     const k = market === 'FUTURES' ? `FUT_${symbol}` : market === 'GLOBALFUTURES' ? `GLOB_${symbol}` : `IN_${symbol}`;
     const t = getTick(k);
     const px = num(t?.price);
-    if (px != null && px > 0 && Date.now() - (t.time || 0) < 45_000) return { price: px, time: t.time };
+    // v21.44.0: ingest-age (receivedAt) beats exchange-epoch skew.
+    const at = Number(t?.receivedAt) > 0 ? Number(t.receivedAt) : Number(t?.time) || 0;
+    if (px != null && px > 0 && Date.now() - at < 45_000) return { price: px, time: t.time };
     return null;
   } catch { return null; }
 }

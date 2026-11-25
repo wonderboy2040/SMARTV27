@@ -13,6 +13,8 @@
 import 'dotenv/config';
 import express from 'express';
 import { subscribe as feedSubscribe, snapshot as feedSnapshot, feedStatus, pruneLiveFeedNow } from './liveFeed.js';
+import { cxNow, cxClockStatus, startCxClock } from './ai/cxClock.js';
+import { createTickGate } from './lib/tickGate.js';
 import { ensureUsSubscribed, usClientUp, usClientDown, usMarketOpen as _usMarketOpen, isStaleUsQuote as _isStaleUsQuote, getUsSessionQuote, releaseUsSubscribed } from './usStream.js';
 import { initInStream, ensureInSubscribed, inClientUp, inClientDown, releaseInSubscribed } from './inStream.js';
 import { ensureCryptoSubscribed, cryptoClientUp, cryptoClientDown, releaseCryptoSubscribed, fetchCoinDcxTickers, lastTickerSource } from './cryptoStream.js';
@@ -1359,6 +1361,9 @@ function sseConnClose(ip) {
 // round-trips with /api/quote, the intraday scanner and the SSE watcher.
 // ------------------------------------------------------------
 initInStream({ fetchGrowwNseQuote, fetchYahooQuote, toYahooSymbol });
+// v21.44.0: CoinDCX server-clock calibration (passive WS/REST samples are
+// primary; this only guarantees a warm offset right after boot).
+startCxClock();
 
 // v18.6.4 PROXY TRUST: X-Forwarded-For sirf tabhi honor hota hai jab the
 // TCP peer khud loopback ho (localhost reverse-proxy) YA
@@ -1396,6 +1401,20 @@ function clientIpOf(req) {
   return peer;
 }
 
+// v21.44.0 [HONEST FRESHNESS]: every wire tick carries two separate ages.
+//   feedAgeMs  = localNow - liveFeed.receivedAt  (our ingest age — skew-free)
+//   ageMs      = cxNow() - exchangeTime          (true quote age at source)
+// The old client used `Date.now() - tick.time`; with this box 3-5s behind
+// UTC that went NEGATIVE for CoinDCX epochs and painted stale quotes as
+// "0ms old". serverNow is the CoinDCX-corrected clock for client math.
+function enrichFeedTick(tick, nowLocal = Date.now(), nowCx = cxNow()) {
+  const receivedAt = Number(tick?.receivedAt);
+  const exchangeTime = Number(tick?.exchangeTime);
+  const feedAgeMs = receivedAt > 0 ? Math.max(0, nowLocal - receivedAt) : 0;
+  const ageMs = exchangeTime > 0 ? Math.max(0, nowCx - exchangeTime) : feedAgeMs;
+  return { ...tick, ageMs, feedAgeMs, serverNow: nowCx };
+}
+
 app.get('/api/stream', (req, res) => {
   // v7.0.2 SECURITY + v18.6.3: per-IP SSE connection cap (class-aware —
   // see sseConnMax above / lib/sseCap.js). Authed/loopback retries get a
@@ -1421,6 +1440,17 @@ app.get('/api/stream', (req, res) => {
   const keys = new Set([
     ...inSyms.map(s => `IN_${s}`),
     ...usSyms.map(s => `US_${s}`),
+    ...cryptoSyms.map(s => `IN_${s}`),
+    ...futSyms.map(s => `FUT_${s}`),
+    ...globSyms.map(s => `GLOB_${s}`),
+  ]);
+  // v21.44.0 [HONEST MAX SPEED]: CoinDCX domains get a 100ms wire cap
+  // (10 updates/sec/symbol — measured live ceiling is ~1.5/sec for perps
+  // and ~1 per 7-10s for INR spot, so EVERY genuine tick passes) with a
+  // near-zero 0.001% dead-band. Equities keep the proven 1s/0.05% shape.
+  // `crypto=` maps to IN_ (spot INR); `in=` equities also use IN_ but are
+  // NOT in this set, so NSE symbols never inherit the crypto cadence.
+  const fastKeys = new Set([
     ...cryptoSyms.map(s => `IN_${s}`),
     ...futSyms.map(s => `FUT_${s}`),
     ...globSyms.map(s => `GLOB_${s}`),
@@ -1482,7 +1512,11 @@ app.get('/api/stream', (req, res) => {
     }
   };
 
-  const snap = feedSnapshot([...keys]);
+  const _snapRaw = feedSnapshot([...keys]);
+  const _snapNow = Date.now();
+  const _snapCx = cxNow();
+  const snap = {};
+  for (const [k, v] of Object.entries(_snapRaw)) snap[k] = enrichFeedTick(v, _snapNow, _snapCx);
   if (Object.keys(snap).length) _sseWrite(`event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`);
   else {
     // 2026 realtime audit: fresh symbols were JUST subscribed — their live
@@ -1491,7 +1525,11 @@ app.get('/api/stream', (req, res) => {
     // instantly instead of waiting for the first pushed tick.
     const late = setTimeout(() => {
       try {
-        const s2 = feedSnapshot([...keys]);
+        const s2raw = feedSnapshot([...keys]);
+        const s2now = Date.now();
+        const s2cx = cxNow();
+        const s2 = {};
+        for (const [k, v] of Object.entries(s2raw)) s2[k] = enrichFeedTick(v, s2now, s2cx);
         if (Object.keys(s2).length) _sseWrite(`event: snapshot\ndata: ${JSON.stringify(s2)}\n\n`);
       } catch { /* client gone */ }
     }, 1200);
@@ -1499,45 +1537,31 @@ app.get('/api/stream', (req, res) => {
     req.on('close', () => clearTimeout(late));
   }
 
-  // v12.7 BANDWIDTH (recheck R2-#3): per-symbol SSE throttle 400ms→1000ms
-  // + a dead-tick filter (|Δprice| < 0.05% vs the last SENT price pushes
-  // nothing). ~33 subscribed keys × ~200B/frame at ~1Hz was ~0.3-0.4GB/day
-  // of pure egress for price noise the UI's 800ms batcher smoothed away
-  // anyway. A REAL move (>0.05%) still lands within its 1s slot.
-  // v20.7.3 FIX: the dead-tick branch used to overwrite the stored price
-  // with the UNSSENT price — a steady <0.05%/sec drift never crossed the
-  // threshold against the previous tick, so nothing was EVER pushed and
-  // clients displayed stale prices while the market drifted several %.
-  // The baseline must stay the last SENT price (clock refreshes only).
-  const lastSent = {};
-  // v20.7.10: FLAT-PRICE HEARTBEAT — dead-band suppress karta tha ki flat
-  // price wale symbols pe KABHI tick nahi jata; client (useCxLivePrices)
-  // ka dead-band exemption phir ⚡ live label ko feed-alive hone tak (10
-  // min tak) purane price pe zinda rakh sakta tha. Ab suppressed tick ke
-  // 45s baad bhi wire pe kuch nahi gaya → force-send ek tick (flat price
-  // client-side hamesha ≤45s fresh; dead-leg 120s me honest null).
-  const lastSentAt = {};
+  // v21.44.0 [HONEST MAX SPEED + BANDWIDTH]: per-symbol SSE throttle is now
+  // domain-aware instead of one-size-fits-all:
+  //   CoinDCX (spot INR / FUT / GLOB): 100ms cap (10/sec) + 0.001% dead-band
+  //   equities (NSE/US):              1000ms cap + 0.05% dead-band (unchanged)
+  // Live probe: futures book tails ~1.5 updates/sec/symbol and INR spot
+  // bursts every ~7-10s — both sit FAR below the 100ms cap, so every real
+  // CoinDCX tick reaches the browser. The cap only bounds a pathological
+  // burst; it never invents or coalesces away a genuine move.
+  //
+  // GAP SEMANTICS FIX: the old code used the last RECEIVED time as the gap
+  // clock and refreshed it on dead-band suppression, so a real move could
+  // still wait a full throttle slot (or lose to a stream of tiny ticks).
+  // Now `at` is the last SENT time: a move above the band lands at the next
+  // allowed slot, and identical ticks stay suppressed until the heartbeat.
+  //
+  // FLAT-PRICE HEARTBEAT: 15s for crypto (the UI's live badge must not
+  // depend on the 45s equity heartbeat) and 45s for equities. The tick still
+  // carries its original exchange timestamp — a heartbeat is liveness, not
+  // a fabricated price update.
+  const shouldSendTick = createTickGate({ fastKeys });
   const unsub = feedSubscribe((key, tick) => {
     if (_dead || !keys.has(key)) return;
     const now = Date.now();
-    const prev = lastSent[key];
-    if (prev) {
-      if ((now - prev.at) < 1000) return; // ≤1 update/sec/symbol
-      const prevPrice = Number(prev.price);
-      const price = Number(tick?.price);
-      if (Number.isFinite(prevPrice) && prevPrice > 0 && Number.isFinite(price)
-        && Math.abs(price - prevPrice) / prevPrice < 0.0005) {
-        lastSent[key] = { at: now, price: prevPrice }; // refresh clock ONLY — keep last SENT price as baseline
-        if (now - (lastSentAt[key] || 0) > 45_000) {
-          lastSentAt[key] = now;
-          _sseWrite(`event: tick\ndata: ${JSON.stringify({ key, ...tick })}\n\n`);
-        }
-        return;
-      }
-    }
-    lastSent[key] = { at: now, price: Number(tick?.price) || null };
-    lastSentAt[key] = now;
-    _sseWrite(`event: tick\ndata: ${JSON.stringify({ key, ...tick })}\n\n`);
+    if (!shouldSendTick(key, tick?.price, now)) return;
+    _sseWrite(`event: tick\ndata: ${JSON.stringify({ key, ...enrichFeedTick(tick, now, cxNow()) })}\n\n`);
   });
 
   const keepalive = setInterval(() => {
@@ -1546,7 +1570,7 @@ app.get('/api/stream', (req, res) => {
     // desk badge can explain a degradation instead of silently reverting
     // to REST. Flat source→bool keys stay first — existing consumers
     // (useAppState watchdogs) only regex-match those key names.
-    _sseWrite(`event: status\ndata: ${JSON.stringify({ ...feedStatus(), cxRt: cxRtWsStatus() })}\n\n`);
+    _sseWrite(`event: status\ndata: ${JSON.stringify({ ...feedStatus(), cxRt: cxRtWsStatus(), cxClock: cxClockStatus(), serverNow: cxNow() })}\n\n`);
   }, 15000);
   if (typeof keepalive.unref === 'function') keepalive.unref();
 
@@ -1577,7 +1601,7 @@ app.get('/api/feed-status', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   // v10.14: also carries the cxRt WS accelerator health (same shape as
   // the SSE status frame) — one health contract for poll + stream.
-  res.json({ ...feedStatus(), cxRt: cxRtWsStatus() });
+  res.json({ ...feedStatus(), cxRt: cxRtWsStatus(), cxClock: cxClockStatus(), serverNow: cxNow() });
 });
 
 // ------------------------------------------------------------
@@ -3231,7 +3255,9 @@ try {
         const { fetchFuturesPrices } = await import('./ai/futures.js');
         const rows = await fetchFuturesPrices().catch(() => []);
         for (const r of (Array.isArray(rows) ? rows : [])) {
-          const p = Number(r?.mark ?? r?.last);
+          // v21.44.0 [LTP-ONLY EXIT LADDER]: last traded price first; a mark
+          // price is only a fallback when the row genuinely has no `ls`.
+          const p = Number(r?.last ?? r?.mark);
           if (Number.isFinite(p) && p > 0 && r?.pair) pricesByPair[r.pair] = p;
         }
       } catch { /* ladder falls back to port marks */ }
@@ -3676,86 +3702,32 @@ coindcxEnvBootstrap((line) => console.log(line)).catch((e) =>
   console.log(`[coindcx-env] bootstrap failed (non-fatal): ${String(e?.message || e).slice(0, 120)}`));
 
 // ============================================================
-// v20.6 SELF-IMPROVEMENT ENGINE — REMOVED FROM DEFAULT RUNTIME
+// SELF-IMPROVEMENT ENGINE — PERMANENTLY REMOVED (v21.44.0)
 // ------------------------------------------------------------
-// v19.0 introduced a 4-cadence loop (6h harvest · 1h drift · 1h
-// auto-approvals · weekly gate-tune+lessons) that wrote into the
-// ledger and feed the evolution ledger. The live user report was
-// that this loop was CAUSING LOAD on the trade-signal path (every
-// harvest/drift pass walks the ledger; every weekly pass attempts
-// LLM calls; the council prompt block grew with lessons text →
-// council token spend rose + board cycle latency crept up). The
-// user explicitly asked to "completely remove" the loop and clean
-// up the site.
+// History: v19.0 added the 4-cadence loop (6h harvest · 1h drift +
+// auto-approvals · weekly gate-tune + LLM lessons). v20.6.3 removed the
+// UI panel + the 14 /api/ai/self/* routes. v20.7.11 deleted the zero-
+// consumer modules (retrainBridge, strategyEvolution, selfStatus).
+// v21.44.0 (this change) deleted the rest: this scheduler loop,
+// gateTuner.js, selfCouncil.js, the SELFIMPROVE_* env flags, and the
+// two test files (selfImproveEngine, v67-gauntlet). Nothing re-arms
+// the loop; the code is recoverable from git history.
 //
-// Strategy: do NOT delete the loop modules (council.js dynamically
-// `await import('./lessonsEngine.js')` for the lessonsBlock prompt;
-// deleting would crash that path). Instead:
-//   1. Default SELFIMPROVE_ENABLED=false in .env.example (below).
-//   2. Rip the 4 setInterval blocks — even if someone flips the
-//      flag to true, no loop runs (heavy work must be triggered
-//      manually — the /api/ai/self/* routes were removed in v20.6.3).
-//   3. Unmount SelfImprovementPanel from CoinDcxTab (no UI load).
-//   4. (v20.6.3) routes.js handlers + SelfImprovementPanel.tsx were then REMOVED.
+// PASSIVE READ-SIDE (kept — deleting it breaks live features):
+//   • driftMonitor.driftReport  → accuracy-dashboard DRIFT chip + the
+//     v21.33 champion/challenger watch (PURE compute, no timers — see
+//     the [CHAMPION] block just below). Honest "NOT ENOUGH DATA" on an
+//     un-harvested dataset.
+//   • lessonsEngine.lessonsForPrompt → council debate prompt
+//     (council.js crash-guards it; empty dataset → empty string).
 //
-// Modules LEFT IN PLACE (touching them breaks signal generation):
-//   • adaptive.js (v6.7, NOT v19.0) — applyAdaptiveWeights runs on
-//     every board tick in signals.js; DO NOT TOUCH.
-//   • signalMemory.js (v12.4) — applySignalTrustGuards (OB/OS + flip
-//     cooldown gate); INDEPENDENT of this loop.
-//   • selfHeal.js (v19.1) — server stability watchdog (uncaught
-//     exception + memory + event-loop monitor); INDEPENDENT.
-//   • boardAccountability.js (v20.2) — board→trackRecord bridge;
-//     route-layer only; INDEPENDENT.
-//   • mlHealth.js (v18.1) — cached ml-service reachability probe;
-//     INDEPENDENT.
+// Modules LEFT IN PLACE (independent of the loop — do NOT touch):
+//   • adaptive.js (v6.7) — applyAdaptiveWeights on every board tick.
+//   • signalMemory.js (v12.4) — trust guards, cooldown gate.
+//   • selfHeal.js (v19.1) — server stability watchdog.
+//   • boardAccountability.js (v20.2) — board→trackRecord bridge.
+//   • mlHealth.js (v18.1) — ml-service reachability probe.
 // ============================================================
-try {
-  const _siFlag = String(process.env.SELFIMPROVE_ENABLED || 'false').toLowerCase();
-  if (_siFlag === 'true') {
-    // opt-in only — the heavy loop is OFF by default. The flag is kept
-    // for users who want to re-arm the v19.0 loop manually; the
-    // intervals below fire only when SELFIMPROVE_ENABLED=true.
-    const { harvestOutcomes } = await import('./ai/outcomeHarvester.js');
-    const { runDriftCheck } = await import('./ai/driftMonitor.js');
-    const { processAutoApprovals } = await import('./ai/selfCouncil.js');
-    const { runGateTune } = await import('./ai/gateTuner.js');
-    const { generateLessons } = await import('./ai/lessonsEngine.js');
-    const { loadAgentConfig } = await import('./ai/agent.js');
-    const { evolutionStatus } = await import('./ai/evolutionLedger.js');
-
-    setTimeout(() => {
-      try { const h = harvestOutcomes(); console.log(`[selfimprove] boot harvest: +${h.added} rows (total ${h.total}) — drift ${runDriftCheck().verdict}`); } catch { /* guarded */ }
-    }, 45000).unref?.();
-
-    setInterval(() => {
-      try { runDriftCheck(); } catch { /* guarded */ }
-      try { const r = processAutoApprovals(); if (r.autoApplied > 0) console.log(`[selfimprove] auto-approved ${r.autoApplied} safe-tier proposal(s) (24h rule)`); } catch { /* guarded */ }
-    }, 3600000).unref?.();
-
-    setInterval(() => {
-      try { const h = harvestOutcomes(); if (h.added > 0) console.log(`[selfimprove] harvest: +${h.added} rows (total ${h.total})`); } catch { /* guarded */ }
-    }, 6 * 3600000).unref?.();
-
-    setInterval(() => {
-      try {
-        const r = runGateTune({ current: loadAgentConfig() });
-        if (r.verdict !== 'NOT ENOUGH DATA') console.log(`[selfimprove] weekly gate-tune: ${r.verdict}`);
-      } catch { /* guarded */ }
-      generateLessons({ KEYS, OPENAI_COMPAT }).catch(() => { /* LLM down → deterministic path inside */ });
-    }, 7 * 86400000).unref?.();
-
-    const _evo = evolutionStatus();
-    console.log(`[selfimprove] v19.0 SELF-IMPROVEMENT ENGINE armed (opt-in SELFIMPROVE_ENABLED=true) — evolution ledger: ${_evo.total} entries (verified: ${_evo.verified}). DEFAULT is OFF; user re-armed.`);
-  } else {
-    // v20.6 default: the loop is OFF. No intervals, no harvest, no
-    // drift watch, no lessons, no gate-tune. (The /api/ai/self/*
-    // routes were removed in v20.6.3.)
-    console.log('[selfimprove] v20.6 SELF-IMPROVEMENT ENGINE DISABLED by default (SELFIMPROVE_ENABLED not set to true) — loop intervals NOT armed; signal-generation path is now free of this load. The /api/ai/self/* routes were removed in v20.6.3.');
-  }
-} catch (e) {
-  console.log(`[selfimprove] arm check failed (non-fatal — app continues): ${String(e?.message || e).slice(0, 120)}`);
-}
 
 // ------------------------------------------------------------
 // v21.33.0 [PHASE J] CHAMPION/CHALLENGER WATCH — lightweight, always-on.

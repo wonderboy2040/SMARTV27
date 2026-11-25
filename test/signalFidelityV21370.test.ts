@@ -374,14 +374,36 @@ describe('v21.37.0 — tick wiring (fidelity + churn)', () => {
 
   it('v21.38.0 default parity ON: the paper lane is blocked by the same CHOP fidelity veto as live', async () => {
     __resetMtfAutoForTests({
-      config: { enabled: true, executionMode: 'paper', desks: { india: false, crypto: true } },
+      config: {
+        enabled: true, executionMode: 'paper', desks: { india: false, crypto: true },
+        // v21.44.0: pin the legacy single-veto contract for the parity test.
+        entryQualityConsensus: 'single',
+        // v21.44.2: the lean lane (default ON) forces fidelity + consensus to
+        // measure-only, so this LEGACY-contract lock runs the off-path.
+        leanEntryLane: false,
+      },
     });
     expect(loadMtfAutoConfig().paperLiveParity).toBe(true);
     const { paper, calls } = fakePaper();
     const out = await mtfAutoTick(tickP(paper, chopRow()));
     expect(out.opened).toHaveLength(0);
     expect(calls.opened).toHaveLength(0);
-    expect(out.skipped.join(' ')).toMatch(/signal fidelity blocked.*CHOP regime/);
+    expect(out.skipped.join(' ')).toMatch(/entry quality consensus blocked.*CHOP regime/);
+  });
+
+  it('v21.44.1 measure-first default shadow: a lone CHOP fidelity veto warns but does not block', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'paper', desks: { india: false, crypto: true } },
+    });
+    expect(loadMtfAutoConfig().entryQualityConsensus).toBe('shadow');
+    const { paper, calls } = fakePaper();
+    const out = await mtfAutoTick(tickP(paper, chopRow()));
+    expect(out.opened).toHaveLength(1);
+    expect(calls.opened).toHaveLength(1);
+    expect(out.skipped.join(' ')).not.toMatch(/quality consensus blocked/);
+    expect((out as any).shadow?.some((s: any) =>
+      s.warnings?.some((w: any) => w.filter === 'signalFidelity'),
+    )).toBe(true);
   });
 
   it('scope `all` enforces the CHOP fidelity veto in paper', async () => {
@@ -389,13 +411,16 @@ describe('v21.37.0 — tick wiring (fidelity + churn)', () => {
       config: {
         enabled: true, executionMode: 'paper', desks: { india: false, crypto: true },
         signalFidelityScope: 'all',
+        entryQualityConsensus: 'single',
+        // v21.44.2: legacy single-veto lock — lean (default) would shadow it.
+        leanEntryLane: false,
       },
     });
     const { paper, calls } = fakePaper();
     const out = await mtfAutoTick(tickP(paper, chopRow()));
     expect(out.opened).toHaveLength(0);
     expect(calls.opened).toHaveLength(0);
-    expect(out.skipped.join(' ')).toMatch(/signal fidelity blocked.*CHOP regime/);
+    expect(out.skipped.join(' ')).toMatch(/entry quality consensus blocked.*CHOP regime/);
   });
 
   it('scope `all` does not block a clean trend row', async () => {

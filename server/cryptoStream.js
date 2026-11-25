@@ -110,9 +110,49 @@ export function lastTickerSource() { return _tsource; }
  *  honest timestamping — see pollOnce). */
 export function lastTickerAt() { return _upstream.at || 0; }
 
+/**
+ * v21.44.0 [WS-FIRST LTP OVERLAY]: the 20s REST cache is METADATA
+ * (high/low/change/volume) — its `last_price` was up to 20s old even when
+ * the official spot socket had a newer print. Overlay every fresh WS price
+ * onto the cached rows (and append WS-only markets), so boards, signals and
+ * paper entries consume the REAL latest LTP while keeping REST enrichment.
+ * Timestamps come from the WS row (never stamped fresh here).
+ */
+function _spotWsOverlay(tickers) {
+  if (!Array.isArray(tickers) || tickers.length === 0) return tickers;
+  if (!spotWsStatus().servable) return tickers;
+  const wsMap = new Map(spotWsTickerArray().map(r => [r.market, r]));
+  if (wsMap.size === 0) return tickers;
+  const out = [];
+  const seen = new Set();
+  for (const t of tickers) {
+    const market = String(t?.market || '').toUpperCase();
+    if (!market) { out.push(t); continue; }
+    seen.add(market);
+    const w = wsMap.get(market);
+    if (!w) { out.push(t); continue; }
+    out.push({
+      ...t,
+      last_price: w.last_price,
+      // `timestamp` stays the LOCAL batch/ingest clock (stale-source
+      // semantics). The row's genuine CoinDCX event epoch — when the
+      // wire carried `ts` — rides `exchangeTs`; pollOnce turns ONLY that
+      // into the `exchangeTime` label (a local stamp must never
+      // masquerade as an exchange timestamp on the skew-prone box).
+      timestamp: w.timestamp,
+      exchangeTs: w.exchangeTs,
+      // REST stays the 24h metadata leg (high/low/change/volume); only
+      // the LTP + provenance are overlaid from the official socket.
+      feed: 'coindcx-spot-ws',
+    });
+  }
+  for (const w of wsMap.values()) if (!seen.has(w.market)) out.push(w);
+  return out;
+}
+
 export async function fetchCoinDcxTickers() {
   const now = Date.now();
-  if (_upstream.tickers && (now - _upstream.at) < UPSTREAM_CACHE_MS) return _upstream.tickers;
+  if (_upstream.tickers && (now - _upstream.at) < UPSTREAM_CACHE_MS) return _spotWsOverlay(_upstream.tickers);
   if (_upstream.inFlight) return _upstream.inFlight;
   const p = (async () => {
     // heartbeat: any ticker consumer keeps the official spot-WS armed
@@ -145,13 +185,13 @@ export async function fetchCoinDcxTickers() {
       _upstream.tickers = tickers;
       _upstream.at = Date.now();
       _tsource = 'coindcx-rest';
-      return tickers;
+      return _spotWsOverlay(tickers);
     } catch (e) {
       // Transient upstream failure: serve the stale cache briefly instead of
       // failing every consumer at once.
       if (_upstream.tickers && (Date.now() - _upstream.at) < UPSTREAM_STALE_MS) {
         _tsource = 'coindcx-rest-stale';
-        return _upstream.tickers;
+        return _spotWsOverlay(_upstream.tickers);
       }
       // v11.3 leg 2 — the OFFICIAL spot WebSocket book (different CoinDCX
       // host + protocol; datacenter-reachable when REST is not).
@@ -171,7 +211,7 @@ export async function fetchCoinDcxTickers() {
       // v11.3 leg 4 — deep stale: 3-min-old official data beats a dead board.
       if (_upstream.tickers && (Date.now() - _upstream.at) < UPSTREAM_DEEP_STALE_MS) {
         _tsource = 'coindcx-rest-deep-stale';
-        return _upstream.tickers;
+        return _spotWsOverlay(_upstream.tickers);
       }
       throw e;
     }
@@ -368,6 +408,15 @@ async function pollOnce() {
         : (tsrc === 'coindcx-rest-stale' || tsrc === 'coindcx-rest-deep-stale') ? tsrc
         : t.__synthetic ? 'binance-fx-synth'
         : 'coindcx-live';
+      // v21.44.0: only the row's GENUINE exchange epoch (`exchangeTs`
+      // from the spot wire's `ts`) becomes the `exchangeTime` label.
+      // `timestamp` is the local batch/ingest clock (WS rows) or absent
+      // (REST rows) or Date.now() (synthetic rows) — none of that is an
+      // exchange stamp, and on this 3-5s-skewed box it would make the
+      // "true quote age" label lie. `batchAt` stays local so the
+      // existing stale-source semantics are untouched.
+      const exTsRaw = Number(t.exchangeTs ?? 0);
+      const rowCxTs = exTsRaw > 0 ? (exTsRaw < 1e12 ? Math.round(exTsRaw * 1000) : Math.round(exTsRaw)) : 0;
       setTick(`IN_${base}`, {
         price,
         change: chg,
@@ -375,6 +424,7 @@ async function pollOnce() {
         low: parseFloat(t.low) || price,
         volume: parseFloat(t.volume) || 0,
         time: batchAt,
+        exchangeTime: rowCxTs || undefined,
         // 24h-ago price (crypto "today" = rolling 24h window)
         prevClose: (chg > -100) ? price / (1 + chg / 100) : undefined,
       }, feedLabel);
@@ -430,7 +480,7 @@ function _anchorFromSpotWs() {
 // Registered ONCE at import; never throws into the socket (cxSpotWs
 // wraps the call defensively).
 // ---------------------------------------------------------------
-setSpotWsOnPrice((market, price) => {
+setSpotWsOnPrice((market, price, exchangeTime) => {
   try {
     const m = /^([A-Z0-9]+)INR$/.exec(String(market || ''));
     if (!m || !(price > 0)) return; // INR pairs only — IN_ namespace keys
@@ -444,13 +494,18 @@ setSpotWsOnPrice((market, price) => {
     _cdcxLast.set(base, { price, change, high, low, volume, at: Date.now() });
     const b = _binanceLast.get(base);
     if (b && b.price > 0) _anchorRatio.set(base, price / b.price);
+    const cxTs = Number(exchangeTime) > 0 ? Number(exchangeTime) : 0;
     setTick(`IN_${base}`, {
       price,
       change,
       high,
       low,
       volume,
-      time: Date.now(),
+      // v21.44.0: prefer the exchange's own event epoch; fall back to the
+      // local clock only when the wire omitted `ts`. `receivedAt` (in
+      // liveFeed) remains the ingest clock for freshness.
+      time: cxTs > 0 ? cxTs : Date.now(),
+      exchangeTime: cxTs > 0 ? cxTs : undefined,
       prevClose: change > -100 ? price / (1 + change / 100) : undefined,
     }, 'coindcx-spot-ws');
   } catch { /* never let a push break the book merge */ }

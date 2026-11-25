@@ -692,6 +692,10 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
       config: {
         enabled: true, executionMode: 'paper', multiTradeMode: true, maxConcurrentTrades: 2,
         minScore: 75, desks: { india: false, crypto: true },
+        // v21.44.2: LEGACY off-path lock — the lean lane bypasses the tier
+        // gate + widens the floor to 75, so ACTION-79 would open. This test
+        // pins the legacy STRONG/ELITE-only skip reason.
+        leanEntryLane: false,
       },
     });
     const { paper, calls } = fakePaper();
@@ -728,6 +732,10 @@ describe('mtfAutoLink — v21.35.6 universal multi-trade', () => {
         enabled: true, executionMode: 'live', multiTradeMode: true, maxConcurrentTrades: 2,
         universalLiveFloor: 65, riskPerTradeINR: 2000,
         desks: { india: false, crypto: true },
+        // v21.44.2: LEGACY off-path lock — the lean lane (default ON) bypasses
+        // the tier gate + widens the floor to 75, so ACTION-75 would OPEN.
+        // This test pins the legacy STRONG/ELITE-only skip on the off-path.
+        leanEntryLane: false,
       },
     });
     const { paper } = fakePaper();

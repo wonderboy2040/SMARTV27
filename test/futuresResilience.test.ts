@@ -175,12 +175,21 @@ describe('futures.js — v11.3 fetchFuturesPrices resilience chain', () => {
     await expect(fetchFuturesPrices()).rejects.toThrow();
   });
 
-  it('book rows with ONLY mp (no ls) still serve via mark fallback — an illiquid-but-alive perp', async () => {
+  it('v21.44.0 — book rows with ONLY mp (no ls) are NOT served as LTP (mark is display-only)', async () => {
     routeFetch(() => restDead());
     mergeFutBook({ 'B-OBSCURE_USDT': { mp: 1.2345, bmST: Date.now(), cmRT: Date.now() } }, Date.now());
+    // The shared book may hold the mark for display, but the fallback price
+    // chain must not promote an index-weighted mark into a tradeable `last`.
+    expect(futBookSnapshot(5_000).has('B-OBSCURE_USDT')).toBe(false);
+    await expect(fetchFuturesPrices()).rejects.toThrow();
+  });
+
+  it('v21.44.0 — a real ls row still serves, with the mark kept separate', async () => {
+    routeFetch(() => restDead());
+    mergeFutBook({ 'B-OBSCURE_USDT': { ls: 1.2, mp: 1.2345, bmST: Date.now(), cmRT: Date.now() } }, Date.now());
     const rows = await fetchFuturesPrices();
     const row = rows.find(r => r.pair === 'B-OBSCURE_USDT')!;
-    expect(row.last).toBeCloseTo(1.2345, 6); // mark fallback
+    expect(row.last).toBeCloseTo(1.2, 6);
     expect(row.mark).toBeCloseTo(1.2345, 6);
     expect(row.source).toBe('ws-book');
   });

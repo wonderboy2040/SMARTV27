@@ -1201,9 +1201,15 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
 
     // Pre-execution live quote anti-reversal guard in mtfAutoTick:
     // If live price has already dropped >= 25% of risk distance below entry on a LONG signal, mtfAutoTick blocks entry!
+    // v21.44.1: a lone reversal veto is a QUALITY vote that only blocks in
+    // `single` consensus (the legacy any-veto-blocks mode) — the measure-first
+    // `shadow` default just logs it. This regression re-arms `single` so the
+    // live-quote reversal guard still hard-refuses the entry.
+    // v21.44.2: LEGACY off-path lock — the lean lane (default ON) forces the
+    // consensus shadow, so the lone reversal veto could no longer block.
     __resetMtfAutoForTests();
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ markets: ['CRYPTO'], liveExecution: false, minScore: 75 });
+    updateMtfAutoConfig({ markets: ['CRYPTO'], liveExecution: false, minScore: 75, entryQualityConsensus: 'single', leanEntryLane: false });
     const tickRev = await mtfAutoTick({
       boards: {
         CRYPTO: {
@@ -1246,7 +1252,10 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       usdtQuotes: { LINK: 19.85 },
     });
     expect(tickRev.opened.length).toBe(0);
-    expect(tickRev.skipped.some((s: string) => s.includes('entry timing blocked') && s.includes('reversal'))).toBe(true);
+    // v21.44.1: the reversal veto now rides the single quality-consensus layer
+    // (not the old hard "entry timing blocked" branch). In `single` mode one
+    // veto blocks, naming its gate + reason in the consensus skip message.
+    expect(tickRev.skipped.some((s: string) => s.includes('entry quality consensus blocked') && s.includes('reversal'))).toBe(true);
   });
 
   // ------------------------------------------------------------

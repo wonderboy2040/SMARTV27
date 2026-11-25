@@ -108,7 +108,11 @@ export function futBookSnapshot(maxAgeMs = FUT_BOOK_FRESH_MS) {
   const out = new Map();
   for (const [pair, row] of _book) {
     if ((row.at || 0) < cutoff) continue;
-    const last = row.last > 0 ? row.last : (row.mark > 0 ? row.mark : 0);
+    // v21.44.0 [LTP-ONLY FALLBACK]: never promote a mark price into `last`.
+    // The WS sends `mp` as a keep-alive when no trade has printed; serving
+    // that as LTP made paper fills/rechecks use an index-weighted estimate.
+    // A symbol with only `mp` simply waits for its next real `ls` (honest).
+    const last = row.last > 0 ? row.last : 0;
     if (!(last > 0)) continue;
     const m = pair.match(/^B-([A-Z0-9.]+)_/);
     out.set(pair, {

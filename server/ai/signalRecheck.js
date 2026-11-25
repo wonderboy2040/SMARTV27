@@ -848,7 +848,9 @@ export function buildTickStoreResolver({ getTick, staleMs = TICK_STALE_MS } = {}
     const k = market === 'FUTURES' ? `FUT_${symbol}` : market === 'GLOBALFUTURES' ? `GLOB_${symbol}` : `IN_${symbol}`;
     const t = getTick(k);
     const px = _num(t?.price);
-    if (px != null && px > 0 && Date.now() - (t.time || 0) < staleMs) return { price: px, src: 'tick' };
+    // v21.44.0: ingest-age check (receivedAt) — skew-proof on this box.
+    const at = Number(t?.receivedAt) > 0 ? Number(t.receivedAt) : Number(t?.time) || 0;
+    if (px != null && px > 0 && Date.now() - at < staleMs) return { price: px, src: 'tick' };
     return null;
   };
 }

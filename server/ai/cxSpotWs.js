@@ -38,6 +38,7 @@
 // Handshake fail-streak → 30 min cooldown; drops → backoff reconnect.
 // ============================================================
 import { createCxSocketIo } from './cxSocketIo.js';
+import { noteCxServerTime, normalizeCxEpochMs } from './cxClock.js';
 
 const SPOT_WS_URL = 'wss://stream-spot.coindcx.com/socket.io/?EIO=4&transport=websocket';
 const PRICE_CHANNEL = 'currentPrices@spot@1s';
@@ -64,7 +65,7 @@ const STATS_FRESH_MS = 3 * 60_000;
 const MIN_SERVABLE_MARKETS = 25;
 
 // ---- state ----
-const _prices = new Map();   // market "BTCINR" -> { price, at }
+const _prices = new Map();   // market "BTCINR" -> { price, at, exTs } (exTs = genuine exchange epoch, 0 when omitted)
 const _stats = new Map();    // market "BTCINR" -> { pc, v, at }
 let _io = null;              // cxSocketIo controller
 let _demandAt = 0;           // last consumer heartbeat (ms)
@@ -183,6 +184,10 @@ export function spotWsTickerArray() {
       change_24_hour: String(st && now - st.at <= STATS_FRESH_MS ? (st.pc ?? 0) : 0),
       volume: String(st && now - st.at <= STATS_FRESH_MS ? (st.v ?? 0) : 0),
       timestamp: row.at,
+      // v21.44.0: the event's real CoinDCX epoch when present — `timestamp`
+      // stays the local ingest clock (batch/stale semantics), exchangeTs is
+      // the honest exchange stamp for quote-age math.
+      exchangeTs: row.exTs > 0 ? row.exTs : undefined,
       feed: 'coindcx-spot-ws',
     });
   }
@@ -205,17 +210,25 @@ function _onEvent(name, payload) {
   }
   if (!d || typeof d !== 'object') return;
   const now = _nowFn();
+  // v21.44.0: passive CoinDCX clock sample. The spot wire's `ts` is a
+  // genuine exchange epoch (ms) — the offset fixes freshness labels and
+  // the negative-age class without an extra network round-trip.
+  noteCxServerTime(d.ts, 'spot-ws', now);
+  const exchangeTime = normalizeCxEpochMs(d.ts);
   if (d.prices && typeof d.prices === 'object') {
     for (const [rawMarket, raw] of Object.entries(d.prices)) {
       const market = String(rawMarket).toUpperCase();
       if (!/^[A-Z0-9]{2,18}(INR|USDT|BTC|USDC)$/.test(market)) continue;
       const price = _num(raw);
       if (!(price > 0)) continue;
-      _prices.set(market, { price, at: now });
+      // v21.44.0: carry the event's genuine exchange epoch (0 when the
+      // wire omitted `ts`) so the ticker surface can expose `exchangeTs`
+      // — a local `at` must never masquerade as an exchange timestamp.
+      _prices.set(market, { price, at: now, exTs: exchangeTime || 0 });
       // v18.10: direct event-driven push — sub-2s latency from the
       // exchange socket to the SSE wire (defensive: a broken consumer
       // must never kill the socket's book merge).
-      if (_onPrice) { try { _onPrice(market, price); } catch { /* consumer error — book still fresh */ } }
+      if (_onPrice) { try { _onPrice(market, price, exchangeTime); } catch { /* consumer error — book still fresh */ } }
     }
     _lastUpdateAt = now;
   }

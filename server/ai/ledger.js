@@ -29,7 +29,7 @@
 // journal). Pruned to the last 1200 entries (hash chain survives
 // pruning: the head's prevHash simply references the new oldest).
 // v21.11.0 (Superintelligence accuracy upgrade): 400 → 1200. Adaptive
-// weights (MIN_SAMPLE 8), trust.js calibration aur gateTuner sab isi
+// weights (MIN_SAMPLE 8) aur trust.js calibration sab isi
 // ledger se seekhte hain — 400 entries ka rolling window ek active
 // futures desk pe ~2 hafte me purge ho jata tha, isliye learned
 // multipliers baar-baar reset hote the. 1200 = tracked-signals.json

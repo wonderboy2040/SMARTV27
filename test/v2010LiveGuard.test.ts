@@ -451,10 +451,12 @@ describe('v20.7.10 feed reliability — silence watchdogs + heartbeat (source co
     expect(s).toMatch(/BINANCE_SILENT_KILL_MS = 45_000/);
     expect(s).toMatch(/_lastMsgAt = Date\.now\(\)/);
   });
-  it('index.js: flat-price heartbeat — suppressed tick ke 45s baad force-send (flat price wale symbols pe bhi wire pe tick jata hai)', () => {
+  it('v21.44.0: flat-price heartbeat — domain-aware tickGate (equities 45s / crypto 15s force-send; flat price wale symbols pe bhi wire pe tick jata hai)', () => {
     const s = src('server/index.js');
-    expect(s).toMatch(/lastSentAt\[key\] = now/);
-    expect(s).toMatch(/45_000/);
+    expect(s).toMatch(/createTickGate\(\{ fastKeys \}\)/);
+    const tg = src('server/lib/tickGate.js');
+    expect(tg).toMatch(/slowHeartbeatMs: 45_000/);
+    expect(tg).toMatch(/fastHeartbeatMs: 15_000/);
   });
   it('useCxLivePrices: live-tick hard cap 10min → 120s (heartbeat ke saath dead-leg ab jaldi honest null)', () => {
     const s = src('src/components/aitrading/useCxLivePrices.ts');

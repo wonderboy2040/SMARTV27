@@ -628,15 +628,15 @@ export default memo(function CoinDcxTab() {
         </div>
       </div>
 
-      {/* ============ 00d · SELF-IMPROVEMENT ENGINE — REMOVED v20.6.3 ============
-          The user explicitly asked to "completely remove" the loop.
-          v20.6.0 disabled the intervals (default SELFIMPROVE_ENABLED=false).
-          v20.6.3 went further — the panel component FILE was DELETED from
-          the repo, the 14 /api/ai/self/* route handlers were removed from
-          routes.js, and the 8 imports were dropped. The loop module FILES
-          (outcomeHarvester, driftMonitor, etc.) remain because council.js
-          dynamically imports lessonsEngine for the lessonsBlock prompt.
-          See app/docs/CHANGES.md v20.6.3 for the full rationale.
+      {/* ============ 00d · SELF-IMPROVEMENT ENGINE — PERMANENTLY REMOVED (v21.44.0) ============
+          v20.6.3 removed the panel + the 14 /api/ai/self/* routes;
+          v21.44.0 deleted the index.js scheduler loop, gateTuner.js,
+          selfCouncil.js, the SELFIMPROVE_* env flags, and both test
+          files (selfImproveEngine + v67-gauntlet). The passive read-side
+          (driftMonitor.driftReport → accuracy-dashboard DRIFT chip +
+          champion watch; lessonsEngine.lessonsForPrompt → council
+          debate) survives and degrades honestly on an empty dataset.
+          No UI here; no re-arm switch. Rationale: app/docs/CHANGES.md.
       ==================================================================== */}
 
       {/* ============ 00c · PRO TRADER AUTO — SAPTA (v18.6) ============ */}

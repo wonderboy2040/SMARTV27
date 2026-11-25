@@ -25,7 +25,7 @@
 //   The 1s interval below is a WATCHDOG/fallback only: it runs when a symbol's
 //   WS key has been silent >1.2s, so a dead socket never freezes an exit.
 // ============================================================
-import { subscribe, getTick } from '../liveFeed.js';
+import { subscribe, getTick, tickAgeMs } from '../liveFeed.js';
 import {
   mtfAutoSuperAgentManage,
   markAutoTradeSuperAgentIdle,
@@ -344,7 +344,7 @@ function _fallbackPrice(entry) {
   // 1) Same liveFeed key (covers a source that forgot to notify subscribers).
   try {
     const t = getTick(entry.tradeKey);
-    if (Number(t?.price) > 0) return { price: Number(t.price), ageMs: Math.max(0, Date.now() - (Number(t.time) || Date.now())) };
+    if (Number(t?.price) > 0) return { price: Number(t.price), ageMs: tickAgeMs(t) };
   } catch { /* non-fatal */ }
   // 2) Market-qualified quote map from the server stream.
   try {
@@ -451,7 +451,7 @@ function _onLiveTick(key, tick) {
   if (!keyUp) return;
   const price = Number(tick?.price);
   if (!(price > 0)) return;
-  const ageMs = Math.max(0, Date.now() - (Number(tick?.time) || Date.now()));
+  const ageMs = tickAgeMs(tick, Date.now());
   for (const entry of REGISTRY.values()) {
     if (entry.tradeKey !== keyUp && !entry.altKeys.includes(keyUp)) continue;
     // Snapshot-ish telemetry is stamped synchronously; the handler itself is

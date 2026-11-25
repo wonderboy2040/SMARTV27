@@ -23,6 +23,26 @@ export interface LivePnl {
 export interface LiveTickLike {
   price: number;
   time: number;
+  /** v21.44.0: server-measured ingest age + client receipt clock. The
+   *  exchange `time` must not be compared to the local clock (skew). */
+  feedAgeMs?: number;
+  ageMs?: number;
+  receivedAt?: number;
+  recvAt?: number;
+}
+
+/** v21.44.0 — skew-proof tick age. Prefers the server's ingest age plus
+ *  the time elapsed since this client received the frame; falls back to
+ *  `receivedAt`, then (legacy fixtures only) `time`. */
+export function liveTickAgeMs(tick: LiveTickLike | null | undefined, now = Date.now()): number {
+  if (!tick) return Infinity;
+  const base = Number(tick.feedAgeMs);
+  const recv = Number(tick.recvAt);
+  if (Number.isFinite(base) && base >= 0 && recv > 0) return Math.max(0, base + (now - recv));
+  const at = Number(tick.receivedAt);
+  if (at > 0) return Math.max(0, now - at);
+  const t = Number(tick.time);
+  return t > 0 ? Math.max(0, now - t) : Infinity;
 }
 
 /** The SSE tick-key namespace for a manual trade's market — mirrors the
@@ -78,7 +98,7 @@ export function mergeLiveTicks<T extends {
     const key = liveKeyFor(String(t.market || ''), String(t.symbol || ''));
     const tick = key ? ticks[key] : null;
     // the 30s freshness rule — a stale tick must not masquerade as live
-    if (!tick || !(tick.price > 0) || now - tick.time > 30_000) return t;
+    if (!tick || !(tick.price > 0) || liveTickAgeMs(tick, now) > 30_000) return t;
     const pnl = livePnlOf(t as unknown as { market?: string; side?: string; entryPrice?: number; qty?: number; lotSize?: number }, tick.price, usdInr);
     if (!pnl) return t;
     changed = true;

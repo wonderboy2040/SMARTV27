@@ -224,8 +224,8 @@ describe('v7.0.2 ledger prune re-stamp', () => {
   it('verifyLedger stays ok after pruning past the cap (v21.11: 400 → 1200 window)', () => {
     __setLedgerForTests({ entries: [] });
     const sig = { symbol: 'BTC', side: 'LONG', market: 'CRYPTO', votes: [] };
-    // v21.11: ledger learning window 400 → 1200 (adaptive/trust/gateTuner
-    // 3× data) — prune test naye cap pe: 1202 record karo, 1200 rahna chahiye
+    // v21.11: ledger learning window 400 → 1200 (adaptive/trust 3× data;
+    // gateTuner was removed in v21.44.0) — prune test naye cap pe: 1202 record karo, 1200 rahna chahiye
     for (let i = 0; i < 1202; i++) recordExecution(sig, { mode: 'paper', source: 'agent' });
     const v = verifyLedger();
     expect(v.entries).toBe(1200); // pruned to the cap

@@ -19,7 +19,7 @@
 //                                  Yahoo fallback 10s)
 //
 // Render hygiene (the reason this is not a naive setState-per-tick):
-//   • incoming ticks buffer in a ref; ONE batched flush every 800ms
+//   • incoming ticks buffer in a ref; ONE batched flush every 150ms
 //     → ≤1.25 renders/sec for the WHOLE desk instead of 10-20/sec
 //   • document.hidden → flushes pause (zero background renders);
 //     visibilitychange → instant flush so the tab paints live again
@@ -66,6 +66,14 @@ export interface CxLiveTick {
    *  labels every liveFeed write (SSE wire field `source`) so the UI can
    *  badge CoinDCX RT vs Finnhub vs Yahoo-delayed honestly. */
   src?: string;
+  /** v21.44.0: two server-measured ages, stamped when the frame was sent.
+   *  feedAgeMs = our ingest age (clock-skew-free, the liveness gate).
+   *  ageMs     = true exchange quote age (CoinDCX-corrected clock). */
+  feedAgeMs?: number;
+  ageMs?: number;
+  /** Client receipt clock — elapsed time is added to the frame ages so a
+   *  tick does not keep looking fresh while the tab renders stale data. */
+  recvAt?: number;
 }
 
 export type CxLiveStatus = 'connecting' | 'live' | 'down' | 'parked';
@@ -150,7 +158,9 @@ function toWsHealth(raw: Record<string, unknown> | null | undefined): CxWsHealth
   };
 }
 
-const FLUSH_MS = 800;
+// v21.44.0: 800ms → 150ms. CoinDCX perps tail ~1.5 updates/sec/symbol, so
+// this paints every genuine tick within ~150ms without a per-tick render.
+const FLUSH_MS = 150;
 const MAX_SYMS_PER_DOMAIN = 40; // parseSyms server-cap is 60; stay polite
 const HIDDEN_PARK_MS = 30_000;  // v13.2 B2: hidden ≥30s → close the socket
 const BACKOFF_MIN_MS = 1_000;   // v13.2 B4: 1s → 2s → 4s → …
@@ -183,6 +193,8 @@ function toTick(t: Record<string, unknown>): CxLiveTick | null {
     volume: t.volume != null ? Number(t.volume) : undefined,
     time: Number(t.time) || Date.now(),
     src: typeof t.source === 'string' ? t.source : undefined,
+    feedAgeMs: typeof t.feedAgeMs === 'number' && Number.isFinite(t.feedAgeMs) ? Math.max(0, t.feedAgeMs) : undefined,
+    ageMs: typeof t.ageMs === 'number' && Number.isFinite(t.ageMs) ? Math.max(0, t.ageMs) : undefined,
   };
 }
 
@@ -296,6 +308,10 @@ export function useCxLivePrices(active: boolean, spot: string[], fut: string[], 
     const ingest = (key: string, raw: Record<string, unknown>) => {
       const t = toTick(raw);
       if (!t) return;
+      // v21.44.0: client receipt stamp — forSignal adds the elapsed time to
+      // the server-measured feedAgeMs so freshness keeps decaying between
+      // frames instead of freezing at the value stamped on the wire.
+      t.recvAt = Date.now();
       buffer.set(key, t);
       dirty = true;
     };
@@ -334,7 +350,7 @@ export function useCxLivePrices(active: boolean, spot: string[], fut: string[], 
         try {
           const map = JSON.parse(e.data) as Record<string, Record<string, unknown>>;
           for (const [k, v] of Object.entries(map)) ingest(k, v);
-          flush(); // first paint — don't wait the 800ms
+          flush(); // first paint — don't wait for the batch interval
         } catch { /* malformed frame */ }
       });
       src.addEventListener('tick', (e: MessageEvent) => {
@@ -477,8 +493,23 @@ export function useCxLivePrices(active: boolean, spot: string[], fut: string[], 
     // v20.7.10: hard cap 10min → 120s. Server ab FLAT-PRICE HEARTBEAT
     // bhejta hai (suppressed tick ke 45s baad force-send) — isliye feed
     // alive ho to t.time kabhi 45s se zyada stale NAHI hota; 120s+ age
-    // matlab genuinely dead leg (pehle 10 min tak ⚡ jhootha dikhta tha). */
-    const age = typeof t.time === 'number' ? Date.now() - t.time : Infinity;
+    // matlab genuinely dead leg (pehle 10 min tak ⚡ jhootha dikhta tha).
+    //
+    // v21.44.0 CLOCK-SKEW FIX: age ab SERVER ke do stamps se aati hai —
+    // feedAgeMs (our ingest age, skew-free) + client receipt se elapsed.
+    // Pehle `Date.now() - t.time` tha; is PC ka clock CoinDCX epochs se
+    // 3-5s peeche hai, isliye age NEGATIVE aati thi aur stale tick bhi
+    // "0ms old / live" dikhta tha.
+    const nowMs = Date.now();
+    const elapsed = typeof t.recvAt === 'number' ? Math.max(0, nowMs - t.recvAt) : 0;
+    const baseAge = typeof t.feedAgeMs === 'number'
+      ? t.feedAgeMs
+      : typeof t.ageMs === 'number'
+        ? t.ageMs
+        : typeof t.time === 'number'
+          ? Math.max(0, nowMs - t.time)
+          : Infinity;
+    const age = Number.isFinite(baseAge) ? baseAge + elapsed : Infinity;
     if (age > 30_000) {
       // v20.7.12 [H3-5]: domain-correct in-watch check (pehle cross-domain
       // union set tha — spot me bacha hua BTC futures tick ko 'watched'

@@ -304,7 +304,15 @@ describe('v21.38.0 — auto tick enforcement + parity', () => {
 
   it('enforce blocks a 30%-past-entry paper chase before sizing (timing guard alone allowed 35%)', async () => {
     __resetMtfAutoForTests({
-      config: { enabled: true, executionMode: 'paper', desks: { india: false, crypto: true } },
+      config: {
+        enabled: true, executionMode: 'paper', desks: { india: false, crypto: true },
+        // v21.44.0: pin the legacy any-veto-blocks contract; the default
+        // consensus mode is covered in entryQualityConsensusV21440.test.ts.
+        entryQualityConsensus: 'single',
+        // v21.44.2: the lean lane (default ON) forces the consensus shadow,
+        // so this LEGACY off-path lock runs with lean disabled.
+        leanEntryLane: false,
+      },
     });
     const { paper, calls } = fakePaper();
     const out = await mtfAutoTick(tick(paper, cleanBoard(), {
@@ -312,9 +320,9 @@ describe('v21.38.0 — auto tick enforcement + parity', () => {
     }));
     expect(out.opened).toHaveLength(0);
     expect(calls.opened).toHaveLength(0);
-    expect(out.skipped.join(' ')).toMatch(/pre-entry recheck blocked.*late chase/i);
+    expect(out.skipped.join(' ')).toMatch(/entry quality consensus blocked \(1\/2\).*late chase/i);
     const st = mtfAutoStatus();
-    expect(st.events.some((e: any) => e.kind === 'pre-entry-block')).toBe(true);
+    expect(st.events.some((e: any) => e.kind === 'entry-quality-block')).toBe(true);
   });
 
   it('shadow records the would-block but still opens the paper trade', async () => {
@@ -346,7 +354,13 @@ describe('v21.38.0 — auto tick enforcement + parity', () => {
 
   it('paper parity runs the live entry-quality veto (noise stop + fading momentum)', async () => {
     __resetMtfAutoForTests({
-      config: { enabled: true, executionMode: 'paper', desks: { india: false, crypto: true } },
+      config: {
+        enabled: true, executionMode: 'paper', desks: { india: false, crypto: true },
+        // v21.44.0: pin the legacy single-veto contract.
+        entryQualityConsensus: 'single',
+        // v21.44.2: legacy off-path lock — lean (default ON) would shadow it.
+        leanEntryLane: false,
+      },
     });
     const { paper, calls } = fakePaper();
     const board = cleanBoard({
@@ -357,7 +371,7 @@ describe('v21.38.0 — auto tick enforcement + parity', () => {
     const out = await mtfAutoTick(tick(paper, board));
     expect(out.opened).toHaveLength(0);
     expect(calls.opened).toHaveLength(0);
-    expect(out.skipped.join(' ')).toMatch(/PAPER \(live-parity\) entry veto — .*ATR < 1\.1× floor.*FADING/i);
+    expect(out.skipped.join(' ')).toMatch(/entry quality consensus blocked \(1\/2\).*ATR < 1\.1× floor.*FADING/i);
   });
 
   it('paperLiveParity:false restores the legacy paper-exempt lane', async () => {

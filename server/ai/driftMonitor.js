@@ -21,17 +21,21 @@
 // Verdict ladder (honest, never dramatic):
 //   STABLE / DRIFTING / ALARM — plus per-model PSI table.
 //
-// Alarm path: recordChange('drift-alarm') lands on the evolution
-// ledger + the retrain bridge CONSUMES the verdict (Phase 2 wiring
-// decides whether a retrain actually fires — never automatic
-// without SELFIMPROVE_AUTO_RETRAIN).
+// v21.44.0 [READ-SIDE ONLY]: the active self-improve engine (scheduler,
+// gateTuner, selfCouncil) is permanently removed, so this module is now
+// a passive READ-SIDE monitor — it computes the drift verdict but never
+// arms timers, records alarms, or fires retrain proposals. The pure
+// `driftReport` is consumed by the accuracy dashboard (DRIFT chip), the
+// v21.33 champion/challenger watch, and the lessons engine. It stays
+// honest on an empty/un-harvested dataset: every instrument reports
+// "NOT ENOUGH DATA" instead of a verdict, and the verdict ladder
+// collapses to STABLE.
 //
-// Pure compute. No timers. Consumers: selfStatus, routes, index
-// scheduler (1h), retrainBridge.
+// Pure compute. No timers. Consumers: accuracyDashboard, the index
+// champion/challenger watch, lessonsEngine.
 // ============================================================
 import { rowsForGateTuning } from './outcomeHarvester.js';
 import { trustReport, modelPerformanceWindows } from './trust.js';
-import { recordChange } from './evolutionLedger.js';
 
 const r2 = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : null);
 
@@ -186,36 +190,5 @@ export function driftReport({ now = Date.now() } = {}) {
   };
 }
 
-let _lastAlarmAt = 0;
-let _tgPushedAlarms = 0;
-/** Scheduler entry — alarm → evolution ledger (6h throttle) + verdict
- * for the retrain bridge. NEVER throws.
- * v21.33.0 [PHASE K2]: ALARM par Telegram DRIFT ALERT bhi jaata hai
- * (owner push, dynamic import se — koi cycle nahi, failure par silent). */
-export function runDriftCheck() {
-  try {
-    const r = driftReport();
-    if (r.verdict === 'ALARM' && Date.now() - _lastAlarmAt > 6 * 3600000) {
-      _lastAlarmAt = Date.now();
-      recordChange('drift-alarm', `DRIFT ALARM — vote:${r.voteDrift.verdict} cal:${r.calibrationDrift.verdict} perf:${r.performanceDrift.verdict}`, {
-        vote: r.voteDrift.verdict, calibration: r.calibrationDrift.verdict, performance: r.performanceDrift.verdict,
-        alarmModels: r.voteDrift.alarmCount || 0,
-      });
-      // K2 Telegram alert — best-effort, non-blocking, secrets env se.
-      try {
-        import('./secrets.js').then(({ sendTelegramMessage }) => {
-          const msg = `⚠️ <b>DRIFT ALERT</b>\nvote: <b>${r.voteDrift.verdict}</b> · cal: <b>${r.calibrationDrift.verdict}</b> · perf: <b>${r.performanceDrift.verdict}</b>\n${r.summary}\nAction: retrain proposal eligible — gateTuner suggest karega, auto-tune kabhi nahi.`;
-          sendTelegramMessage(msg, { token: process.env.TG_TOKEN || '', chatId: process.env.TG_CHAT_ID || '' })
-            .then(() => { _tgPushedAlarms += 1; })
-            .catch(() => { /* telegram down — evolution ledger entry already done */ });
-        }).catch(() => { /* dynamic import fail — silent */ });
-      } catch { /* best-effort */ }
-    }
-    return r;
-  } catch {
-    return { verdict: 'UNKNOWN', summary: 'drift check failed — honest unknown' };
-  }
-}
-
 // ---------------- tests ----------------
-export const __testables = { voteBuckets, _lastAlarmAtRef: () => _lastAlarmAt, _setLastAlarmAt: (v) => { _lastAlarmAt = v; } };
+export const __testables = { voteBuckets };

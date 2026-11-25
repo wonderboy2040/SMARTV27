@@ -23,9 +23,10 @@
 // read-only-fs degrades to memory). Pruned to last 600 entries
 // (chain survives pruning, head links to new oldest).
 //
-// Pure module — no network, no timers. Consumers: selfCouncil,
-// gateTuner, driftMonitor, retrainBridge, lessonsEngine,
-// strategyEvolution, selfStatus, routes.
+// Pure module — no network, no timers. v21.44.0: consumers are now the
+// read-side only (driftMonitor recordChange paths are gone); this ledger
+// is appended via recordChange from outcomeHarvester/lessonsEngine and
+// read by evolutionStatus. gateTuner/selfCouncil/retrainBridge deleted.
 // ============================================================
 import crypto from 'node:crypto';
 import { loadJSON, saveJSON } from '../lib/store.js';

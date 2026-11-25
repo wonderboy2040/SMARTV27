@@ -22,7 +22,7 @@ import { apiFetch, getProxyBase } from '../../utils/api';
 // cards do (~1s pushes) — LTP + P&L repaint instantly between the 5s
 // reconciliation polls.
 import { useCxLivePrices } from './useCxLivePrices';
-import { mergeLiveTicks, liveKeyFor } from './manualLiveMerge';
+import { mergeLiveTicks, liveKeyFor, liveTickAgeMs, type LiveTickLike } from './manualLiveMerge';
 
 interface ManualTradeView {
   id: number;
@@ -469,16 +469,16 @@ export const ManualTradeMonitor = memo(function ManualTradeMonitor({ desk, notif
     rtLists.spot, rtLists.fut, rtLists.glob, rtLists.india,
   );
   // the LIVE merge — pure helper (unit-tested); re-renders land at the
-  // hook's 800ms batched cadence, never per tick
+  // hook's 150ms batched cadence, never per tick
   const liveTrades = useMemo(
-    () => mergeLiveTicks(trades || [], ticks as Record<string, { price: number; time: number }>, usdInr),
+    () => mergeLiveTicks(trades || [], ticks as Record<string, LiveTickLike>, usdInr),
     [trades, ticks, usdInr],
   );
   const anyLive = openTrades.some(t => {
     if (t.assetKind === 'OPTION') return false; // premium domain — BS re-price, 5s poll
     const k = liveKeyFor(String(t.market || ''), String(t.symbol || ''));
-    const tick = k ? (ticks as Record<string, { price: number; time: number }>)[k] : null;
-    return !!tick && Date.now() - tick.time <= 30_000;
+    const tick = k ? (ticks as Record<string, LiveTickLike>)[k] : null;
+    return !!tick && liveTickAgeMs(tick) <= 30_000;
   });
 
   const close = useCallback(async (t: ManualTradeView) => {

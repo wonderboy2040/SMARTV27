@@ -140,21 +140,23 @@ const gate = (cfg: any, over: Record<string, unknown> = {}) => evaluateManualEnt
 // A) entry quality — the exact AVAX ticket the auto lane vetoed
 // ------------------------------------------------------------
 describe('manual parity — entry quality (ATR stop floor + FADING)', () => {
-  it('blocks the 17 Nov AVAX geometry: 0.69% stop = 0.77× ATR', () => {
+  it('v21.44.1 — 17 Nov AVAX geometry: a lone noise-stop-out quality veto now WARNS (no block)', () => {
     const cfg = seed();
     const row = avaxNoiseRow();
     const out = gate(cfg, { row, entry: 30, stopLoss: 30.207, atrPct: 0.9 });
-    expect(out.ok).toBe(false);
-    expect(out.blockers.join(' ')).toMatch(/noise stop-out/);
+    // direction is PAKKA + no hard contradiction → entry opens; the soft
+    // noise stop-out is quality evidence logged as a warning, not a blocker.
+    expect(out.ok).toBe(true);
+    expect(out.warnings.some((w: any) => w.filter === 'entryQuality' && /noise stop-out/.test(w.reason))).toBe(true);
     expect(out.telemetry.entryQuality.slAtrMult).toBeLessThan(1.1);
   });
 
-  it('blocks a FADING momentum entry even when the stop is wide enough', () => {
+  it('v21.44.1 — a FADING momentum entry is a lone quality WARN (no block)', () => {
     const cfg = seed();
     const row = cleanRow({ trigger: { roc1: 0.05, roc3: 0.1, volRatio: 1.2 } }); // SHORT + rising = FADING
     const out = gate(cfg, { row, entry: 30, stopLoss: 30.3, atrPct: 0.4 });
-    expect(out.ok).toBe(false);
-    expect(out.blockers.join(' ')).toMatch(/momentum FADING/i);
+    expect(out.ok).toBe(true);
+    expect(out.warnings.some((w: any) => w.filter === 'entryQuality' && /momentum FADING/i.test(w.reason))).toBe(true);
     expect(out.telemetry.entryQuality.momentumState).toBe('FADING');
   });
 
@@ -197,12 +199,14 @@ describe('manual parity — direction certificate', () => {
 // C) signal fidelity — CHOP has no directional follow-through
 // ------------------------------------------------------------
 describe('manual parity — signal fidelity', () => {
-  it('blocks a CHOP-regime row when the gate is enforce', () => {
+  it('v21.44.1 — CHOP-regime fidelity veto is a lone quality WARN (no block)', () => {
     const cfg = seed({ signalFidelity: 'enforce' });
     const out = gate(cfg, { row: cleanRow({ regime: 'CHOP' }) });
-    expect(out.ok).toBe(false);
-    expect(out.blockers.join(' ')).toMatch(/signal fidelity/);
-    expect(out.blockers.join(' ')).toMatch(/CHOP/);
+    // a single quality gate only warns; two distinct gates (or a forced
+    // extreme ratio) would block. Telemetry still records the would-block.
+    expect(out.ok).toBe(true);
+    expect(out.warnings.some((w: any) => w.filter === 'signalFidelity' && /CHOP/.test(w.reason))).toBe(true);
+    expect(out.telemetry.fidelity?.wouldBlock).toBe(true);
   });
 
   it('shadow mode records telemetry without blocking', () => {
@@ -333,15 +337,17 @@ describe('manual parity — LIVE lane', () => {
     expect(out.lane).toBe('LIVE');
   });
 
-  it('blocks the AVAX noise stop and FADING momentum', () => {
+  it('v21.44.1 — LIVE lane: AVAX noise stop + FADING momentum are quality WARNS (no block)', () => {
     const cfg = seed();
     const out = liveGate(cfg, {
       row: avaxNoiseRow({ trigger: { roc1: 0.05, roc3: 0.1, volRatio: 1.2 } }),
       entry: 30, stopLoss: 30.207, atrPct: 0.9,
     });
-    expect(out.ok).toBe(false);
-    expect(out.blockers.join(' ')).toMatch(/noise stop-out/);
-    expect(out.blockers.join(' ')).toMatch(/momentum FADING/i);
+    // both soft evidences ride the same entryQuality gate (one distinct
+    // vote) → warns under the measure-first default; direction PAKKA holds.
+    expect(out.ok).toBe(true);
+    expect(out.warnings.some((w: any) => w.filter === 'entryQuality' && /noise stop-out/.test(w.reason))).toBe(true);
+    expect(out.warnings.some((w: any) => w.filter === 'entryQuality' && /momentum FADING/i.test(w.reason))).toBe(true);
   });
 });
 

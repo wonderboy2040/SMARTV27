@@ -43,7 +43,7 @@
 //     Binance REST 5s path (and CoinDCX REST) carry on alone.
 // ============================================================
 import WebSocket from 'ws';
-import { setTick, getTick } from '../liveFeed.js';
+import { setTick, getTick, tickAgeMs } from '../liveFeed.js';
 
 const BINANCE_FUT_WS_BASE = 'wss://fstream.binance.com/stream?streams=';
 const BINANCE_FUT_MAX_STREAMS = 20;          // cap the combined stream list (cryptoStream parity)
@@ -316,8 +316,11 @@ function _landTick(base, row) {
     // SOURCE PRIORITY: CoinDCX owns the key while ITS ticks are fresh —
     // the accelerator must never fight the authoritative exchange for the
     // badge (a flapping source label is worse than a steady 2s cadence).
-    if (cur.source === 'coindcx-fut-ws' && (now - (cur.time || 0)) < CX_WS_FRESH_MS) return;
-    if (cur.source === 'coindcx-fut-rt' && (now - (cur.time || 0)) < CX_RT_FRESH_MS) return;
+    // v21.44.0: ingest age (receivedAt) — not exchange epoch vs local now.
+    // The old comparison went NEGATIVE on a clock-skewed box, so the
+    // accelerator stood down even when the CoinDCX WS tick was stale.
+    if (cur.source === 'coindcx-fut-ws' && tickAgeMs(cur, now) < CX_WS_FRESH_MS) return;
+    if (cur.source === 'coindcx-fut-rt' && tickAgeMs(cur, now) < CX_RT_FRESH_MS) return;
     // out-of-order guard — a late frame must never regress a newer tick
     if ((cur.time || 0) > row.time + 1500) return;
   }

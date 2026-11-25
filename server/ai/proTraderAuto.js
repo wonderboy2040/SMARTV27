@@ -30,7 +30,7 @@ import {
   cxEnsureTradePage, cxSelectPair, cxPlaceOrder, cxClosePosition, cxReadPositions,
   dhanEnsurePage, dhanSelectScrip, dhanPlaceOrder, dhanClosePosition, dhanReadPositions,
 } from './browserAgent.js';
-import { getTick } from '../liveFeed.js';
+import { getTick, tickAgeMs } from '../liveFeed.js';
 import { fetchCoinDcxTickers } from '../cryptoStream.js';
 // v18.9: shared NSE holiday calendar (pure module — no cycle)
 import { isNseHoliday } from '../intraday/time.js';
@@ -997,7 +997,7 @@ async function _monitorLtpOf(t, boards, deps) {
     // PnL/ROE ~84x inflated). Ab futures FUT_ se, spot/india IN_ se.
     const tickKey = market === 'FUTURES' ? `FUT_${t.symbol}` : `IN_${t.symbol}`;
     const tick = tickFn(tickKey);
-    if (tick?.price > 0 && Date.now() - (tick.time || 0) < 30_000) {
+    if (tick?.price > 0 && tickAgeMs(tick) < 30_000) {
       return { ltp: Number(tick.price), stale: false };
     }
   } catch { /* store read — never fatal */ }

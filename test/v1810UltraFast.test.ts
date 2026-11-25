@@ -319,7 +319,7 @@ describe('v18.10 #3 — official spot-WS price print → liveFeed tick instantly
   });
 
   it('cryptoStream registers the direct-push handler at import (source contract)', () => {
-    expect(cryptoStreamSrc).toContain('setSpotWsOnPrice((market, price) => {');
+    expect(cryptoStreamSrc).toContain('setSpotWsOnPrice((market, price, exchangeTime) => {'); // v21.44.0: genuine wire ts rides the push
     expect(cryptoStreamSrc).toContain("'coindcx-spot-ws'"); // honest source label
     expect(cxRtStreamSrc).toContain("import { spotWsStatus } from './cxSpotWs.js'");
   });

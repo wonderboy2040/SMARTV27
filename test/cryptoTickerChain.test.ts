@@ -109,6 +109,70 @@ describe('cryptoStream — v11.3 fetchCoinDcxTickers resilience chain', () => {
     expect(crypto.lastTickerSource()).toBe('coindcx-rest');
   });
 
+  it('v21.44.0 — fresh REST cache + newer spot-WS print → LTP overlaid, REST metadata preserved', async () => {
+    crypto._setCryptoFetchForTest(async () => ({
+      ok: true,
+      json: async () => [{ market: 'BTCINR', last_price: '4350000', change_24_hour: '1.25', high: '4500000', low: '4200000', volume: '77' }],
+    }));
+    const first = await crypto.fetchCoinDcxTickers();
+    expect((first as any[])[0].last_price).toBe('4350000');
+    armSpotWs();
+    spot.spotWsDemand();
+    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    const sock = sockets[0];
+    await vi.waitFor(() => expect(sock.sent.filter((f: string) => f.startsWith('42["join"'))).toHaveLength(2));
+    sock.serverMessage(priceFrame(BIG_BOOK));
+    const t = await crypto.fetchCoinDcxTickers();
+    const btc = (t as any[]).find(x => x.market === 'BTCINR')!;
+    expect(parseFloat(btc.last_price)).toBe(6_123_456.5); // socket print, not the 20s cache
+    expect(btc.high).toBe('4500000');                     // REST enrichment survives
+    expect(btc.feed).toBe('coindcx-spot-ws');
+    expect(crypto.lastTickerSource()).toBe('coindcx-rest'); // metadata leg label
+  });
+
+  it('v21.44.0 — WS rows carry the GENUINE exchange epoch (exchangeTs); a local stamp never masquerades as one', async () => {
+    crypto._setCryptoFetchForTest(async () => restDead());
+    armSpotWs();
+    await expect(crypto.fetchCoinDcxTickers()).rejects.toThrow(); // arms the WS
+    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    const sock = sockets[0];
+    await vi.waitFor(() => expect(sock.sent.filter((f: string) => f.startsWith('42["join"'))).toHaveLength(2));
+    const tsFrame = (ts?: number) =>
+      `42["currentPrices@spot#update",${JSON.stringify({ event: 'currentPrices@spot#update', data: JSON.stringify(ts == null ? { pr: 'SPOT', prices: BIG_BOOK } : { pr: 'SPOT', prices: BIG_BOOK, ts }) })}]`;
+    // wire event WITH a genuine exchange ts → the row exposes it
+    sock.serverMessage(tsFrame(1_700_000_000_000));
+    let t = await crypto.fetchCoinDcxTickers();
+    let btc = (t as any[]).find(x => x.market === 'BTCINR')!;
+    expect(btc.exchangeTs).toBe(1_700_000_000_000);
+    // wire event WITHOUT ts → no invented exchange stamp (only the local `timestamp`)
+    sock.serverMessage(tsFrame());
+    t = await crypto.fetchCoinDcxTickers();
+    btc = (t as any[]).find(x => x.market === 'BTCINR')!;
+    expect(btc.exchangeTs).toBeUndefined();
+    expect(typeof btc.timestamp).toBe('number');
+  });
+
+  it('v21.44.0 — the poller stamps liveFeed `exchangeTime` ONLY from the genuine wire ts', async () => {
+    crypto._setCryptoFetchForTest(async () => restDead());
+    armSpotWs();
+    await expect(crypto.fetchCoinDcxTickers()).rejects.toThrow(); // arms the WS
+    crypto.ensureCryptoSubscribed(['BTC']);
+    crypto.cryptoClientUp();
+    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    const sock = sockets[0];
+    await vi.waitFor(() => expect(sock.sent.filter((f: string) => f.startsWith('42["join"'))).toHaveLength(2));
+    // (ts fixed in 2023 — the cxClock sample is rejected by its sanity clamp,
+    // so the suite stays hermetic; only the label plumbing is under test)
+    sock.serverMessage(`42["currentPrices@spot#update",${JSON.stringify({ event: 'currentPrices@spot#update', data: JSON.stringify({ pr: 'SPOT', prices: BIG_BOOK, ts: 1_700_000_000_000 }) })}]`);
+    await vi.waitFor(() => {
+      const tick = getTick('IN_BTC');
+      expect(tick).toBeTruthy();
+      expect(tick!.source).toBe('coindcx-spot-ws');
+      expect(tick!.exchangeTime).toBe(1_700_000_000_000);
+    }, { timeout: 6_000 });
+    crypto.cryptoClientDown();
+  });
+
   it('leg 3 — REST dead + spot-WS book servable → the OFFICIAL WS array serves (source coindcx-spot-ws)', async () => {
     crypto._setCryptoFetchForTest(async () => restDead());
     armSpotWs();

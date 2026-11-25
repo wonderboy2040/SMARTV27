@@ -759,6 +759,13 @@ describe('Phase 0 — LIVE entry quality vetoes', () => {
   });
 
   it('tick refuses a LIVE entry on a sub-ATR stop + FADING trigger', async () => {
+    // v21.44.1: this regression is armed in the legacy `single` consensus —
+    // a lone live-entry-quality veto blocks on its own. The measure-first
+    // `shadow` default only LOGS this would-block (covered in
+    // entryQualityConsensusV21440); this test keeps the hard refusal.
+    // v21.44.2: LEGACY off-path lock — the lean lane (default ON) forces the
+    // consensus shadow, so a lone live-entry-quality veto can't block.
+    __resetMtfAutoForTests({ config: phase0Config({ entryQualityConsensus: 'single', leanEntryLane: false }) });
     const { paper, calls } = fakePaper();
     const exec = liveExec();
     const out = await mtfAutoTick({
@@ -775,6 +782,8 @@ describe('Phase 0 — LIVE entry quality vetoes', () => {
     expect(out.opened).toHaveLength(0);
     expect(calls.opened).toHaveLength(0);
     expect(exec).not.toHaveBeenCalled();
-    expect(out.skipped.join(' ')).toMatch(/LIVE entry veto/);
+    expect(out.skipped.join(' ')).toMatch(/entry quality consensus blocked/);
+    expect(out.skipped.join(' ')).toMatch(/entryQuality/);
+    expect(out.skipped.join(' ')).toMatch(/noise stop-out|momentum FADING/i);
   });
 });
